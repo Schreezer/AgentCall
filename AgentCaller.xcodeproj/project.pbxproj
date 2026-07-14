@@ -1,0 +1,427 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		43D143C8E4224A4FB867E78D /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41C4271FB4949524CC6F4A9F /* AppDelegate.swift */; };
+		6430A6982A7589405C7EF9D7 /* ConnectionConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B07010CC7FFC70B15F2D63F /* ConnectionConfigurationTests.swift */; };
+		7E491E0ABAF39C4DE5FFACF3 /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66E4EA04E64A4C94B7A56C6B /* ConnectionView.swift */; };
+		80130123320211526C95720D /* ConnectionConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46DF6A4FE5F4CDAD72FA77FC /* ConnectionConfiguration.swift */; };
+		8A0FDC18565039B45ED5D805 /* IncomingCall.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7262E5F4AD2767721904F981 /* IncomingCall.swift */; };
+		8BB04FB27ABD62C254BC1FAC /* CallCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB9D3409104D81E3DEEC1254 /* CallCoordinator.swift */; };
+		957F2B184857FB30AA060459 /* AgentSetupInstructions.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEF39272247BF60214A0BEF2 /* AgentSetupInstructions.swift */; };
+		A3E5DC05BB8F22EDA3D90BFC /* AgentCallerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9E51FD459E01545DCFFC6CA /* AgentCallerApp.swift */; };
+		BFE72835A882B0597F91A3C7 /* PushManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC26C500D21B32B7498A8503 /* PushManager.swift */; };
+		CD5D079389BB406840EF1BD7 /* SecureStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA1843E09F7866CA18A41A09 /* SecureStore.swift */; };
+		FEFBEF3D9CC2F17ACBABDABD /* CallerSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F87AF9411D79A5AA2EFAB24C /* CallerSettingsView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		F2F18212E24115B4428FF898 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7E9A9464C585D46B0C260D91 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A92049AC4B28B20C3F50D584;
+			remoteInfo = AgentCaller;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		41C4271FB4949524CC6F4A9F /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		46DF6A4FE5F4CDAD72FA77FC /* ConnectionConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionConfiguration.swift; sourceTree = "<group>"; };
+		4B07010CC7FFC70B15F2D63F /* ConnectionConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionConfigurationTests.swift; sourceTree = "<group>"; };
+		57FCDD8E6C46D5D683B336A1 /* AgentCallerTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AgentCallerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		66E4EA04E64A4C94B7A56C6B /* ConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionView.swift; sourceTree = "<group>"; };
+		7262E5F4AD2767721904F981 /* IncomingCall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncomingCall.swift; sourceTree = "<group>"; };
+		7DF97C6A4A405A68F94FCF37 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		AC26C500D21B32B7498A8503 /* PushManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushManager.swift; sourceTree = "<group>"; };
+		B9E51FD459E01545DCFFC6CA /* AgentCallerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCallerApp.swift; sourceTree = "<group>"; };
+		BB9D3409104D81E3DEEC1254 /* CallCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallCoordinator.swift; sourceTree = "<group>"; };
+		C5E771A6258E6D9851018FBE /* AgentCaller.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AgentCaller.entitlements; sourceTree = "<group>"; };
+		CEF39272247BF60214A0BEF2 /* AgentSetupInstructions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSetupInstructions.swift; sourceTree = "<group>"; };
+		DF0D60EB0139343478B029DA /* AgentCaller.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AgentCaller.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		EA1843E09F7866CA18A41A09 /* SecureStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureStore.swift; sourceTree = "<group>"; };
+		F87AF9411D79A5AA2EFAB24C /* CallerSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallerSettingsView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		1F7B3EBBCDA988466234B1B1 /* AgentCaller */ = {
+			isa = PBXGroup;
+			children = (
+				C5E771A6258E6D9851018FBE /* AgentCaller.entitlements */,
+				B9E51FD459E01545DCFFC6CA /* AgentCallerApp.swift */,
+				CEF39272247BF60214A0BEF2 /* AgentSetupInstructions.swift */,
+				41C4271FB4949524CC6F4A9F /* AppDelegate.swift */,
+				BB9D3409104D81E3DEEC1254 /* CallCoordinator.swift */,
+				F87AF9411D79A5AA2EFAB24C /* CallerSettingsView.swift */,
+				46DF6A4FE5F4CDAD72FA77FC /* ConnectionConfiguration.swift */,
+				66E4EA04E64A4C94B7A56C6B /* ConnectionView.swift */,
+				7262E5F4AD2767721904F981 /* IncomingCall.swift */,
+				7DF97C6A4A405A68F94FCF37 /* Info.plist */,
+				AC26C500D21B32B7498A8503 /* PushManager.swift */,
+				EA1843E09F7866CA18A41A09 /* SecureStore.swift */,
+			);
+			name = AgentCaller;
+			path = ios/AgentCaller;
+			sourceTree = "<group>";
+		};
+		2C6F2520ED59E56122E910E0 = {
+			isa = PBXGroup;
+			children = (
+				1F7B3EBBCDA988466234B1B1 /* AgentCaller */,
+				FF65783A38C9644131245ECA /* AgentCallerTests */,
+				B478277C42837AD4C660AD7D /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		B478277C42837AD4C660AD7D /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				DF0D60EB0139343478B029DA /* AgentCaller.app */,
+				57FCDD8E6C46D5D683B336A1 /* AgentCallerTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		FF65783A38C9644131245ECA /* AgentCallerTests */ = {
+			isa = PBXGroup;
+			children = (
+				4B07010CC7FFC70B15F2D63F /* ConnectionConfigurationTests.swift */,
+			);
+			name = AgentCallerTests;
+			path = ios/AgentCallerTests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A92049AC4B28B20C3F50D584 /* AgentCaller */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E6F0572F9D7A43C3A58E5355 /* Build configuration list for PBXNativeTarget "AgentCaller" */;
+			buildPhases = (
+				20FBD637B3716ED45867BE2D /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AgentCaller;
+			packageProductDependencies = (
+			);
+			productName = AgentCaller;
+			productReference = DF0D60EB0139343478B029DA /* AgentCaller.app */;
+			productType = "com.apple.product-type.application";
+		};
+		FC8D78B10C42C18535273968 /* AgentCallerTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 753C531E9969114E1F8B1E1C /* Build configuration list for PBXNativeTarget "AgentCallerTests" */;
+			buildPhases = (
+				090BE0694D16760D0BE3E6B9 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				ABA9F4A37B4EEA795C58F1FC /* PBXTargetDependency */,
+			);
+			name = AgentCallerTests;
+			packageProductDependencies = (
+			);
+			productName = AgentCallerTests;
+			productReference = 57FCDD8E6C46D5D683B336A1 /* AgentCallerTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		7E9A9464C585D46B0C260D91 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+			};
+			buildConfigurationList = BDD8D0AF36E9D1D6B64447EC /* Build configuration list for PBXProject "AgentCaller" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 2C6F2520ED59E56122E910E0;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A92049AC4B28B20C3F50D584 /* AgentCaller */,
+				FC8D78B10C42C18535273968 /* AgentCallerTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		090BE0694D16760D0BE3E6B9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6430A6982A7589405C7EF9D7 /* ConnectionConfigurationTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		20FBD637B3716ED45867BE2D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A3E5DC05BB8F22EDA3D90BFC /* AgentCallerApp.swift in Sources */,
+				957F2B184857FB30AA060459 /* AgentSetupInstructions.swift in Sources */,
+				43D143C8E4224A4FB867E78D /* AppDelegate.swift in Sources */,
+				8BB04FB27ABD62C254BC1FAC /* CallCoordinator.swift in Sources */,
+				FEFBEF3D9CC2F17ACBABDABD /* CallerSettingsView.swift in Sources */,
+				80130123320211526C95720D /* ConnectionConfiguration.swift in Sources */,
+				7E491E0ABAF39C4DE5FFACF3 /* ConnectionView.swift in Sources */,
+				8A0FDC18565039B45ED5D805 /* IncomingCall.swift in Sources */,
+				BFE72835A882B0597F91A3C7 /* PushManager.swift in Sources */,
+				CD5D079389BB406840EF1BD7 /* SecureStore.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		ABA9F4A37B4EEA795C58F1FC /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A92049AC4B28B20C3F50D584 /* AgentCaller */;
+			targetProxy = F2F18212E24115B4428FF898 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		02C3ECED8C2651E3BC2A5DCC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		2BBB97D040B4FC20BF81599C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = ios/AgentCaller/AgentCaller.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = ios/AgentCaller/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.chirag.agentcaller;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		5F00A597417632F118328FA4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.chirag.AgentCallerTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AgentCaller.app/AgentCaller";
+			};
+			name = Release;
+		};
+		63DF545A2AEB6D73B48F3635 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = ios/AgentCaller/AgentCaller.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = ios/AgentCaller/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.chirag.agentcaller;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		96EDF3F8E0511A2079327EC8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		E54310ED4B41A9504254C3A2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.chirag.AgentCallerTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AgentCaller.app/AgentCaller";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		753C531E9969114E1F8B1E1C /* Build configuration list for PBXNativeTarget "AgentCallerTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E54310ED4B41A9504254C3A2 /* Debug */,
+				5F00A597417632F118328FA4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		BDD8D0AF36E9D1D6B64447EC /* Build configuration list for PBXProject "AgentCaller" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				96EDF3F8E0511A2079327EC8 /* Debug */,
+				02C3ECED8C2651E3BC2A5DCC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E6F0572F9D7A43C3A58E5355 /* Build configuration list for PBXNativeTarget "AgentCaller" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2BBB97D040B4FC20BF81599C /* Debug */,
+				63DF545A2AEB6D73B48F3635 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 7E9A9464C585D46B0C260D91 /* Project object */;
+}

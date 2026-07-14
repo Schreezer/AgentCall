@@ -1,0 +1,47 @@
+name: AgentCaller
+options:
+  bundleIdPrefix: com.chirag
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: 0.1.0
+targets:
+  AgentCaller:
+    type: application
+    platform: iOS
+    sources:
+      - path: ios/AgentCaller
+    info:
+      path: ios/AgentCaller/Info.plist
+      properties:
+        CFBundleDisplayName: Caller
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CallerRelayURL: https://push.caller.example
+        LSApplicationCategoryType: public.app-category.productivity
+        UILaunchScreen: {}
+        UIBackgroundModes:
+          - audio
+          - voip
+          - remote-notification
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.chirag.agentcaller
+        CODE_SIGN_ENTITLEMENTS: ios/AgentCaller/AgentCaller.entitlements
+        TARGETED_DEVICE_FAMILY: "1"
+    scheme:
+      testTargets:
+        - AgentCallerTests
+  AgentCallerTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ios/AgentCallerTests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: AgentCaller

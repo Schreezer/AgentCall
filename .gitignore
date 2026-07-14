@@ -1,0 +1,14 @@
+.DS_Store
+DerivedData/
+*.xcresult
+*.xcuserstate
+xcuserdata/
+backend/data/
+backend/.env
+backend/node_modules/
+*.p8
+*.mobileprovision
+
+# Machine-specific deployment notes and overrides
+MAC_TEST_DEPLOYMENT.md
+Local.xcconfig
