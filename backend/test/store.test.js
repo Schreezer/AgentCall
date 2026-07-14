@@ -70,7 +70,12 @@ test("call idempotency is scoped to one installation", () => {
   const store = makeStore();
   const one = store.createInstallation(device).installation;
   const two = store.createInstallation({ ...device, token: "b".repeat(64) }).installation;
-  const input = { callerName: "Hermes", message: "Wake up", scheduledAt: new Date().toISOString() };
+  const input = {
+    callerName: "Hermes",
+    message: "Wake up",
+    audioID: "audio-id",
+    scheduledAt: new Date().toISOString(),
+  };
   const first = store.createCall(one.id, input, "wake-up-1");
   const duplicate = store.createCall(one.id, input, "wake-up-1");
   const otherUser = store.createCall(two.id, input, "wake-up-1");
@@ -78,6 +83,7 @@ test("call idempotency is scoped to one installation", () => {
   assert.equal(duplicate.created, false);
   assert.equal(otherUser.created, true);
   assert.equal(first.call.id, duplicate.call.id);
+  assert.equal(first.call.audioID, "audio-id");
   assert.notEqual(first.call.id, otherUser.call.id);
 });
 

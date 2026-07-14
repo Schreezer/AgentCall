@@ -26,6 +26,7 @@ export class APNsClient {
       call_id: call.id,
       caller_name: call.callerName,
       message: call.message,
+      ...(call.audioID ? { audio_id: call.audioID } : {}),
     });
 
     return new Promise((resolve, reject) => {

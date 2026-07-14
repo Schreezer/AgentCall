@@ -28,11 +28,12 @@ The relay stores hashes of installation and agent credentials, not their plainte
 ## Call flow
 
 1. Hermes invokes the `urgent-caller` skill with a message, optional time, and stable idempotency key.
-2. The skill sends an authenticated `POST /v1/calls` to the relay.
-3. The relay resolves the scoped installation, persists the call, and returns its ID.
-4. When due, the worker sends a VoIP push only to that installation's current PushKit token.
-5. iOS wakes Caller. The PushKit delegate immediately reports the call through CallKit.
-6. On answer, Caller activates a voice-chat audio session, speaks the message, and ends the call.
+2. For recorded speech, the skill uploads the bounded audio bytes to `POST /v1/audio` and receives an opaque, expiring `audio_id`.
+3. The skill sends an authenticated `POST /v1/calls` to the relay with the text fallback and optional `audio_id`.
+4. The relay resolves the scoped installation, persists the call, and returns its ID.
+5. When due, the worker sends a VoIP push containing only call metadata and the opaque audio ID to that installation's current PushKit token.
+6. iOS wakes Caller. The PushKit delegate immediately reports the call through CallKit.
+7. On answer, Caller downloads audio using its installation credential and plays it through the CallKit audio session. Download or decoding failures fall back to on-device text-to-speech.
 
 ## Relay API
 
@@ -41,6 +42,8 @@ The relay stores hashes of installation and agent credentials, not their plainte
 - `PUT /v1/installations/:id/device`: refresh a token using the installation secret.
 - `POST /v1/installations/:id/pairing-code`: rotate the one-time code.
 - `POST /v1/pairings/claim`: exchange a code for an installation-scoped agent token.
+- `POST /v1/audio`: upload a bounded, short-lived audio attachment using the agent token.
+- `GET /v1/installations/:id/audio/:audio-id`: download owned audio using the installation secret.
 - `POST /v1/calls`: create a call using `Authorization: Bearer <agent-token>` and `Idempotency-Key`.
 - `GET /v1/calls/:id`: inspect a call owned by the authenticated installation.
 
@@ -51,6 +54,7 @@ The relay stores hashes of installation and agent credentials, not their plainte
 - Call idempotency is scoped per installation.
 - APNs delivery is routed only to the authenticated installation.
 - The APNs key remains exclusively in developer infrastructure.
+- Audio is installation-scoped, size/type-limited, non-cacheable, and automatically expires.
 - iOS installation credentials are stored in Keychain.
 - Relay responses use `Cache-Control: no-store`.
 
@@ -58,4 +62,4 @@ Before production, add database transactions, audited credential rotation/revoca
 
 ## Audio and live conversation
 
-The MVP uses text-to-speech. A later audio-file flow should keep the file on the user's Hermes VPS or encrypted object storage and put only a protected reference in the call record. A live agent call should use the VoIP push only to ring; after answer, the app joins a WebRTC session controlled by the user-owned agent service.
+The MVP supports both on-device text-to-speech and short-lived uploaded speech files. The APNs payload carries only an opaque ID, never the audio bytes. A production relay should move encrypted attachments to object storage with lifecycle deletion. A live agent call should use the VoIP push only to ring; after answer, the app joins a WebRTC session controlled by the user-owned agent service.

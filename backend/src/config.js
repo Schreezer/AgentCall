@@ -6,6 +6,11 @@ export function loadConfig(env = process.env) {
     publicBaseURL: env.PUBLIC_BASE_URL ?? `http://127.0.0.1:${env.PORT ?? 8788}`,
     dataFile: env.DATA_FILE ?? "./data/relay-state.json",
     pairingTTLSeconds: parseInteger(env.PAIRING_TTL_SECONDS ?? "900", "PAIRING_TTL_SECONDS"),
+    audio: {
+      directory: env.AUDIO_DIR ?? "./data/audio",
+      maxBytes: parseInteger(env.AUDIO_MAX_BYTES ?? "5000000", "AUDIO_MAX_BYTES"),
+      ttlSeconds: parseInteger(env.AUDIO_TTL_SECONDS ?? "3600", "AUDIO_TTL_SECONDS"),
+    },
     apns: {
       teamID: env.APNS_TEAM_ID,
       keyID: env.APNS_KEY_ID,

@@ -42,17 +42,25 @@ enum AgentSetupInstructions {
         - Create an agentskills-compatible skill named `urgent-caller` in the normal skills directory
           for this agent, such as `$HERMES_HOME/skills/urgent-caller`.
         - Provide a small Python standard-library client accepting `--message`, optional `--at`,
-          optional `--caller-name`, and required `--idempotency-key`.
+          optional `--caller-name`, optional `--audio-file` / `--audio-content-type`, and required
+          `--idempotency-key`.
+        - For `--audio-file`, upload the raw bytes to `POST $CALLER_RELAY_URL/v1/audio` using the
+          agent bearer token, detected audio MIME type, a stable upload idempotency key, and an
+          `X-Audio-Filename` header. Put the returned `audio_id` in the call JSON.
         - It must send `POST $CALLER_RELAY_URL/v1/calls` with
           `Authorization: Bearer $CALLER_AGENT_TOKEN`, JSON content, and an `Idempotency-Key` header.
         - A scheduled timestamp must be ISO-8601 with `Z` or an explicit timezone offset.
         - Keep spoken text between 1 and 500 characters and put the urgent fact first.
+        - Keep `message` populated as the text-to-speech fallback when attaching audio. Audio is
+          limited to 5 MB by default and expires from the relay after one hour.
 
         VPS behavior
         - Immediate calls can go directly through the skill client.
         - If reliable local scheduling is needed, use the agent's existing scheduler or install one
           supervised single-process service with persistent SQLite state on this VPS. Do not create a
           new cloud server merely for Caller.
+        - For scheduled audio, run the upload client near the due time instead of uploading the file
+          far in advance.
         - Use stable event-specific idempotency keys so retries never create duplicate calls.
         - For an immediate call, poll `GET $CALLER_RELAY_URL/v1/calls/:id` with the same bearer
           token for up to 15 seconds, until its status becomes `delivered` or `failed`. Do not stop

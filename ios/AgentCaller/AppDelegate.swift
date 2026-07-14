@@ -2,6 +2,7 @@ import UIKit
 
 @MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    let configuration = ConnectionConfiguration()
     let callCoordinator = CallCoordinator()
     private(set) lazy var pushManager = PushManager(callCoordinator: callCoordinator)
 
@@ -9,6 +10,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        pushManager.configuration = configuration
         pushManager.start()
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--preview-call") {
@@ -27,11 +29,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         }
         #endif
         return true
-    }
-
-    func configure(with configuration: ConnectionConfiguration) {
-        pushManager.configuration = configuration
-        pushManager.registerCurrentTokenIfPossible()
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {

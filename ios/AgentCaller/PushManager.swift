@@ -167,7 +167,15 @@ final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
         for type: PKPushType,
         completion: @escaping () -> Void
     ) {
-        guard type == .voIP, let call = IncomingCall(payload: payload.dictionaryPayload) else {
+        let dictionary = payload.dictionaryPayload
+        let audioRequest = CallAudioRequestFactory.make(
+            payload: dictionary,
+            relayURL: configuration?.validatedRelayURL,
+            installationID: configuration?.installationID,
+            installationSecret: configuration?.installationSecret
+        )
+        guard type == .voIP,
+              let call = IncomingCall(payload: dictionary, audioRequest: audioRequest) else {
             completion()
             return
         }

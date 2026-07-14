@@ -37,7 +37,7 @@ test("VoIP delivery uses the correct APNs host, headers, and minimal payload", a
 
   await client.sendVoIP(
     { token: "a".repeat(64), environment: "sandbox" },
-    { id: "call-id", callerName: "Hermes", message: "Wake up" },
+    { id: "call-id", callerName: "Hermes", message: "Wake up", audioID: "audio-id" },
   );
 
   assert.equal(observed.host, "https://api.sandbox.push.apple.com");
@@ -52,5 +52,6 @@ test("VoIP delivery uses the correct APNs host, headers, and minimal payload", a
     call_id: "call-id",
     caller_name: "Hermes",
     message: "Wake up",
+    audio_id: "audio-id",
   });
 });

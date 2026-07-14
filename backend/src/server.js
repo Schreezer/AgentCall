@@ -1,13 +1,15 @@
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { APNsClient } from "./apns.js";
+import { AudioStore, normalizeAudioContentType, SUPPORTED_AUDIO_TYPES } from "./audio-store.js";
 import { loadConfig, readAPNsPrivateKey } from "./config.js";
 import { Store } from "./store.js";
 import { CallWorker } from "./worker.js";
 
-export function createServer({ config, store, worker }) {
+export function createServer({ config, store, worker, audioStore }) {
   const pairingLimiter = new RateLimiter({ limit: 20, windowMs: 60_000 });
   const callLimiter = new RateLimiter({ limit: 10, windowMs: 60_000 });
+  const audioLimiter = new RateLimiter({ limit: 10, windowMs: 60_000 });
 
   return http.createServer(async (request, response) => {
     try {
@@ -43,6 +45,23 @@ export function createServer({ config, store, worker }) {
           : json(response, 401, { error: "invalid_installation_credential" });
       }
 
+      const audioDownloadMatch = url.pathname.match(
+        /^\/v1\/installations\/([0-9a-f-]+)\/audio\/([0-9a-f-]+)$/i,
+      );
+      if (request.method === "GET" && audioDownloadMatch) {
+        const installation = store.getInstallation(audioDownloadMatch[1], bearerToken(request));
+        if (!installation) return json(response, 401, { error: "invalid_installation_credential" });
+        const audio = audioStore.read(audioDownloadMatch[2], installation.id);
+        if (!audio) return json(response, 404, { error: "audio_not_found_or_expired" });
+        response.writeHead(200, {
+          "cache-control": "no-store",
+          "content-length": audio.data.length,
+          "content-type": audio.contentType,
+          "x-content-type-options": "nosniff",
+        });
+        return response.end(audio.data);
+      }
+
       const installationMatch = url.pathname.match(/^\/v1\/installations\/([0-9a-f-]+)$/i);
       if (request.method === "GET" && installationMatch) {
         const installation = store.getInstallation(installationMatch[1], bearerToken(request));
@@ -53,6 +72,7 @@ export function createServer({ config, store, worker }) {
       if (request.method === "DELETE" && installationMatch) {
         const deleted = store.deleteInstallation(installationMatch[1], bearerToken(request));
         if (!deleted) return json(response, 401, { error: "invalid_installation_credential" });
+        audioStore.deleteForInstallation(installationMatch[1]);
         response.writeHead(204, { "cache-control": "no-store" });
         return response.end();
       }
@@ -82,14 +102,42 @@ export function createServer({ config, store, worker }) {
       const installation = store.findInstallationByAgentToken(bearerToken(request));
       if (!installation) return json(response, 401, { error: "invalid_agent_credential" });
 
+      if (request.method === "POST" && url.pathname === "/v1/audio") {
+        if (!audioLimiter.allow(installation.id)) return json(response, 429, { error: "rate_limited" });
+        const idempotencyKey = request.headers["idempotency-key"];
+        if (!validIdempotencyKey(idempotencyKey)) {
+          return json(response, 400, { error: "valid_idempotency_key_required" });
+        }
+        const contentType = normalizeAudioContentType(request.headers["content-type"]);
+        if (!SUPPORTED_AUDIO_TYPES.has(contentType)) {
+          return json(response, 415, { error: "unsupported_audio_type" });
+        }
+        const result = audioStore.save(installation.id, {
+          data: await readBinary(request, audioStore.maxBytes),
+          contentType,
+          filename: request.headers["x-audio-filename"],
+          idempotencyKey,
+        });
+        return json(response, result.created ? 201 : 200, publicAudio(result.audio));
+      }
+
       if (request.method === "POST" && url.pathname === "/v1/calls") {
         if (!callLimiter.allow(installation.id)) return json(response, 429, { error: "rate_limited" });
         const idempotencyKey = request.headers["idempotency-key"];
-        if (!idempotencyKey || idempotencyKey.length > 200) {
+        if (!validIdempotencyKey(idempotencyKey)) {
           return json(response, 400, { error: "valid_idempotency_key_required" });
         }
         const parsed = validateCall(await readJSON(request));
         if (parsed.error) return json(response, 400, { error: parsed.error });
+        const audio = parsed.value.audioID
+          ? audioStore.metadata(parsed.value.audioID, installation.id)
+          : null;
+        if (parsed.value.audioID && !audio) {
+          return json(response, 400, { error: "invalid_or_expired_audio_id" });
+        }
+        if (audio && Date.parse(parsed.value.scheduledAt) >= Date.parse(audio.expiresAt)) {
+          return json(response, 400, { error: "audio_will_expire_before_scheduled_call" });
+        }
         const result = store.createCall(installation.id, parsed.value, idempotencyKey);
         // Give immediate calls one delivery attempt before answering so simple
         // agent clients usually receive the terminal APNs result instead of a
@@ -107,7 +155,7 @@ export function createServer({ config, store, worker }) {
 
       return json(response, 404, { error: "not_found" });
     } catch (error) {
-      const status = error.code === "INVALID_JSON" || error.code === "BODY_TOO_LARGE" ? 400 : 500;
+      const status = errorStatus(error);
       return json(response, status, { error: status === 500 ? "internal_error" : error.message });
     }
   });
@@ -128,11 +176,20 @@ function validateCall(body) {
   if (!message || message.length > 500) return { error: "message_must_be_1_to_500_characters" };
   const callerName = typeof body.caller_name === "string" ? body.caller_name.trim() : "Hermes";
   if (!callerName || callerName.length > 80) return { error: "invalid_caller_name" };
+  const audioID = body.audio_id ?? null;
+  if (audioID !== null && !/^[0-9a-f-]{36}$/i.test(audioID)) return { error: "invalid_audio_id" };
   const scheduledAt = body.scheduled_at ?? new Date().toISOString();
   const timestamp = Date.parse(scheduledAt);
   if (!Number.isFinite(timestamp)) return { error: "scheduled_at_must_be_iso_8601" };
   if (timestamp > Date.now() + 366 * 24 * 60 * 60 * 1000) return { error: "scheduled_at_too_far_in_future" };
-  return { value: { message, callerName, scheduledAt: new Date(Math.max(timestamp, Date.now())).toISOString() } };
+  return {
+    value: {
+      message,
+      callerName,
+      audioID,
+      scheduledAt: new Date(Math.max(timestamp, Date.now())).toISOString(),
+    },
+  };
 }
 
 async function readJSON(request) {
@@ -146,6 +203,24 @@ async function readJSON(request) {
   } catch {
     throw Object.assign(new Error("invalid_json"), { code: "INVALID_JSON" });
   }
+}
+
+async function readBinary(request, maxBytes) {
+  const contentLength = Number.parseInt(request.headers["content-length"] ?? "0", 10);
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw Object.assign(new Error("audio_file_too_large"), { code: "BODY_TOO_LARGE" });
+  }
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of request) {
+    total += chunk.length;
+    if (total > maxBytes) {
+      throw Object.assign(new Error("audio_file_too_large"), { code: "BODY_TOO_LARGE" });
+    }
+    chunks.push(chunk);
+  }
+  if (total === 0) throw Object.assign(new Error("audio_file_required"), { code: "AUDIO_FILE_REQUIRED" });
+  return Buffer.concat(chunks, total);
 }
 
 function bearerToken(request) {
@@ -169,15 +244,38 @@ function publicCall(call) {
     status: call.status,
     caller_name: call.callerName,
     message: call.message,
+    audio_id: call.audioID,
+    has_audio: Boolean(call.audioID),
     scheduled_at: call.scheduledAt,
     delivered_at: call.deliveredAt,
     delivery_errors: call.deliveryErrors,
   };
 }
 
+function publicAudio(audio) {
+  return {
+    audio_id: audio.id,
+    content_type: audio.contentType,
+    filename: audio.filename,
+    size_bytes: audio.sizeBytes,
+    expires_at: audio.expiresAt,
+  };
+}
+
 function json(response, status, body) {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   response.end(JSON.stringify(body));
+}
+
+function validIdempotencyKey(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 200;
+}
+
+function errorStatus(error) {
+  if (error.code === "BODY_TOO_LARGE") return 413;
+  if (error.code === "UNSUPPORTED_AUDIO_TYPE") return 415;
+  if (["INVALID_JSON", "AUDIO_FILE_REQUIRED"].includes(error.code)) return 400;
+  return 500;
 }
 
 class RateLimiter {
@@ -202,9 +300,10 @@ class RateLimiter {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const config = loadConfig();
   const store = new Store(config.dataFile, { pairingTTLSeconds: config.pairingTTLSeconds });
+  const audioStore = new AudioStore(config.audio.directory, config.audio);
   const apns = new APNsClient({ ...config.apns, privateKey: readAPNsPrivateKey(config) });
   const worker = new CallWorker(store, apns);
-  const server = createServer({ config, store, worker });
+  const server = createServer({ config, store, worker, audioStore });
   worker.start();
   server.listen(config.port, () => console.log(`Caller push relay listening on :${config.port}`));
 }

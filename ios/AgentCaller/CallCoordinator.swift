@@ -2,10 +2,12 @@ import AVFoundation
 import CallKit
 import OSLog
 
-final class CallCoordinator: NSObject, CXProviderDelegate, AVSpeechSynthesizerDelegate, @unchecked Sendable {
+final class CallCoordinator: NSObject, CXProviderDelegate, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegate, @unchecked Sendable {
     private let provider: CXProvider
     private let logger = Logger(subsystem: "com.chirag.agentcaller", category: "CallKit")
     private let speechSynthesizer = AVSpeechSynthesizer()
+    private var audioPlayer: AVAudioPlayer?
+    private var audioDownloadTask: Task<Void, Never>?
     private var calls: [UUID: IncomingCall] = [:]
     private var activeCallID: UUID?
 
@@ -50,6 +52,10 @@ final class CallCoordinator: NSObject, CXProviderDelegate, AVSpeechSynthesizerDe
     }
 
     func providerDidReset(_ provider: CXProvider) {
+        audioDownloadTask?.cancel()
+        audioDownloadTask = nil
+        audioPlayer?.stop()
+        audioPlayer = nil
         speechSynthesizer.stopSpeaking(at: .immediate)
         calls.removeAll()
         activeCallID = nil
@@ -72,6 +78,10 @@ final class CallCoordinator: NSObject, CXProviderDelegate, AVSpeechSynthesizerDe
     }
 
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
+        audioDownloadTask?.cancel()
+        audioDownloadTask = nil
+        audioPlayer?.stop()
+        audioPlayer = nil
         speechSynthesizer.stopSpeaking(at: .immediate)
         calls.removeValue(forKey: action.callUUID)
         if activeCallID == action.callUUID { activeCallID = nil }
@@ -80,11 +90,48 @@ final class CallCoordinator: NSObject, CXProviderDelegate, AVSpeechSynthesizerDe
 
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
         guard let activeCallID, let call = calls[activeCallID] else { return }
-        speak(call.message)
+        playAudioOrFallback(for: call)
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+        audioDownloadTask?.cancel()
+        audioDownloadTask = nil
+        audioPlayer?.stop()
+        audioPlayer = nil
         speechSynthesizer.stopSpeaking(at: .immediate)
+    }
+
+    private func playAudioOrFallback(for call: IncomingCall) {
+        guard let request = call.audioRequest else {
+            speak(call.message)
+            return
+        }
+        audioDownloadTask?.cancel()
+        audioDownloadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try Task.checkCancellation()
+                guard let http = response as? HTTPURLResponse,
+                      (200..<300).contains(http.statusCode),
+                      !data.isEmpty else {
+                    throw URLError(.badServerResponse)
+                }
+                guard self.activeCallID == call.id else { return }
+                let player = try AVAudioPlayer(data: data)
+                player.delegate = self
+                guard player.prepareToPlay(), player.play() else {
+                    throw URLError(.cannotDecodeContentData)
+                }
+                self.audioPlayer = player
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.activeCallID == call.id else { return }
+                self.logger.error("Audio message failed; using speech fallback: \(error.localizedDescription, privacy: .public)")
+                self.speak(call.message)
+            }
+        }
     }
 
     private func speak(_ message: String) {
@@ -95,6 +142,22 @@ final class CallCoordinator: NSObject, CXProviderDelegate, AVSpeechSynthesizerDe
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        finishActiveCall()
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        audioPlayer = nil
+        finishActiveCall()
+    }
+
+    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: (any Error)?) {
+        audioPlayer = nil
+        guard let activeCallID, let call = calls[activeCallID] else { return }
+        logger.error("Audio message decode failed; using speech fallback: \(error?.localizedDescription ?? "unknown error", privacy: .public)")
+        speak(call.message)
+    }
+
+    private func finishActiveCall() {
         guard let id = activeCallID else { return }
         provider.reportCall(with: id, endedAt: Date(), reason: .remoteEnded)
         calls.removeValue(forKey: id)

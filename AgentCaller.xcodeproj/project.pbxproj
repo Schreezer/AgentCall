@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		003F0D76E21D3AB0A006FB91 /* IncomingCallTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0EBBE46B1E251BF0EEAEB2D /* IncomingCallTests.swift */; };
 		43D143C8E4224A4FB867E78D /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41C4271FB4949524CC6F4A9F /* AppDelegate.swift */; };
 		6430A6982A7589405C7EF9D7 /* ConnectionConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B07010CC7FFC70B15F2D63F /* ConnectionConfigurationTests.swift */; };
 		7E491E0ABAF39C4DE5FFACF3 /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66E4EA04E64A4C94B7A56C6B /* ConnectionView.swift */; };
@@ -43,6 +44,7 @@
 		BB9D3409104D81E3DEEC1254 /* CallCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallCoordinator.swift; sourceTree = "<group>"; };
 		C5E771A6258E6D9851018FBE /* AgentCaller.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AgentCaller.entitlements; sourceTree = "<group>"; };
 		CEF39272247BF60214A0BEF2 /* AgentSetupInstructions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSetupInstructions.swift; sourceTree = "<group>"; };
+		D0EBBE46B1E251BF0EEAEB2D /* IncomingCallTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncomingCallTests.swift; sourceTree = "<group>"; };
 		DF0D60EB0139343478B029DA /* AgentCaller.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AgentCaller.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		EA1843E09F7866CA18A41A09 /* SecureStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureStore.swift; sourceTree = "<group>"; };
 		F87AF9411D79A5AA2EFAB24C /* CallerSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallerSettingsView.swift; sourceTree = "<group>"; };
@@ -91,6 +93,7 @@
 			isa = PBXGroup;
 			children = (
 				4B07010CC7FFC70B15F2D63F /* ConnectionConfigurationTests.swift */,
+				D0EBBE46B1E251BF0EEAEB2D /* IncomingCallTests.swift */,
 			);
 			name = AgentCallerTests;
 			path = ios/AgentCallerTests;
@@ -169,6 +172,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				6430A6982A7589405C7EF9D7 /* ConnectionConfigurationTests.swift in Sources */,
+				003F0D76E21D3AB0A006FB91 /* IncomingCallTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -24,17 +24,20 @@ The script exchanges the code for a credential scoped to one Caller installation
 ```bash
 python3 scripts/call.py \
   --message "The message to speak after the user answers" \
+  --audio-file "/path/to/speech.m4a" \
   --at "2026-07-12T05:50:00+05:30" \
   --idempotency-key "stable-event-identifier"
 ```
 
-Omit `--at` to call immediately. Always include a timezone offset in scheduled timestamps. Use a stable event-specific idempotency key so retries cannot create duplicate calls.
+`--audio-file` is optional; `--message` remains required as the text-to-speech fallback. The client uploads supported audio to the relay, then attaches the returned opaque ID to the call. Omit `--at` to call immediately. Always include a timezone offset in scheduled timestamps. Use a stable event-specific idempotency key so retries cannot create duplicate calls.
+
+Audio is limited to 5 MB by default and expires from the relay after one hour. For a later scheduled audio call, schedule the client itself to run near the due time instead of uploading the file far in advance.
 
 ## Judgment rules
 
 - Do not infer urgency merely because a task is overdue.
 - Keep spoken messages under 500 characters and put the key fact first.
-- Do not include passwords, tokens, medical details, or other sensitive content unless the user explicitly requested it.
+- Do not include passwords, tokens, medical details, or other sensitive content in text or audio unless the user explicitly requested it.
 - Ask permission before the first test call.
 - For an immediate call, poll `GET /v1/calls/:id` for up to 15 seconds until the status is `delivered` or `failed`; do not report only the initial `scheduled` response.
 - `delivered` means APNs accepted the VoIP push. Report the call ID, scheduled time, and terminal relay status, but do not claim the phone rang or the user answered.

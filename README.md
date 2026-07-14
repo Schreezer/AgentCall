@@ -42,4 +42,8 @@ Never commit an APNs `.p8` key, `backend/.env`, relay state, PushKit device toke
 
 ## Current MVP
 
-The relay sends `call_id`, `caller_name`, and `message` in the VoIP push. After answer, the app speaks the message on-device and ends the call. Audio-file playback and a live WebRTC conversation are later phases.
+The relay sends small call metadata in the VoIP push. An agent can optionally upload a short-lived MP3, M4A, AAC, WAV, AIFF, or CAF speech file and attach its opaque ID to a call. After answer, the app securely downloads and plays that audio, falling back to on-device speech when needed. Live WebRTC conversation is a later phase.
+
+## License
+
+[MIT](LICENSE)

@@ -37,7 +37,22 @@ Create an agentskills-compatible `urgent-caller` skill under the normal Hermes s
 - required `--message` between 1 and 500 characters;
 - optional timezone-aware `--at`;
 - optional `--caller-name`;
+- optional `--audio-file` and `--audio-content-type`;
 - required stable, event-specific `--idempotency-key`.
+
+When `--audio-file` is present, upload its raw bytes first:
+
+```http
+POST $CALLER_RELAY_URL/v1/audio
+Authorization: Bearer $CALLER_AGENT_TOKEN
+Content-Type: <detected audio MIME type>
+Idempotency-Key: <stable audio upload key>
+X-Audio-Filename: <filename>
+
+<audio bytes>
+```
+
+Use the returned `audio_id` in the call body. Keep `message` populated as the text-to-speech fallback if the audio download or decoding fails.
 
 The client sends:
 
@@ -50,11 +65,12 @@ Idempotency-Key: <stable-event-key>
 {
   "caller_name":"Hermes",
   "message":"The urgent fact to speak",
+  "audio_id":"<optional uploaded audio ID>",
   "scheduled_at":"2026-07-12T05:50:00+05:30"
 }
 ```
 
-Omit `scheduled_at` for an immediate call. For reliable user-owned scheduling, prefer the existing Hermes scheduler or one supervised local service with persistent SQLite state on this VPS. Do not create another cloud server merely for Caller.
+Omit `scheduled_at` for an immediate call. Audio is limited to 5 MB by default and expires after one hour, so schedule the client to upload near the due time rather than uploading long-lived speech files. For reliable user-owned scheduling, prefer the existing Hermes scheduler or one supervised local service with persistent SQLite state on this VPS. Do not create another cloud server merely for Caller.
 
 For an immediate call, poll `GET $CALLER_RELAY_URL/v1/calls/:id` with the same bearer token for up to 15 seconds, until the status becomes `delivered` or `failed`. Do not stop at the initial `scheduled` response. Treat `delivered` as APNs acceptance, not proof that the phone rang or the user answered. If delivery fails, report `delivery_errors` and send the urgent content through the current chat channel as a fallback.
 
