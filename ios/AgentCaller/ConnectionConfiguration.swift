@@ -33,7 +33,7 @@ final class ConnectionConfiguration: ObservableObject {
     private static let installationIDKey = "agentCaller.installationID"
     private static let installationSecretKey = "installation-secret"
     private static let legacyPlaceholderURL = "https://push.caller.example"
-    private static let fallbackRelayURL = "https://push.caller.example"
+    private static let fallbackRelayURL = "https://agentcall-relay.chiragmgg.workers.dev"
 
     init(
         defaults: UserDefaults = .standard,

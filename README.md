@@ -153,7 +153,7 @@ In Xcode:
 4. Open Settings in Caller and replace the placeholder relay URL with your public HTTPS URL.
 5. Allow the permissions requested by the app and wait until its status reads **Ready**.
 
-The checked-in `https://push.caller.example` value is intentionally nonfunctional. Change it in the app or update `CallerRelayURL` in `project.yml` for your deployment. If you change the bundle identifier, update `APNS_BUNDLE_ID` on the relay to match.
+The checked-in managed relay is `https://agentcall-relay.chiragmgg.workers.dev`. Advanced settings may override it for local development. If you change the bundle identifier, update `APNS_BUNDLE_ID` on the relay to match.
 
 ## Pair a personal agent
 

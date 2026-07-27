@@ -21,7 +21,7 @@
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>CallerRelayURL</key>
-	<string>https://push.caller.example</string>
+	<string>https://agentcall-relay.chiragmgg.workers.dev</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>UIBackgroundModes</key>
