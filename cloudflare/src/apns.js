@@ -7,7 +7,7 @@ export class APNsClient {
    */
   constructor(env, { fetcher = fetch, now = Date.now } = {}) {
     this.env = env;
-    this.fetcher = fetcher;
+    this.fetcher = (input, init) => fetcher(input, init);
     this.now = now;
     this.cachedProviderToken = null;
     this.providerTokenIssuedAt = 0;

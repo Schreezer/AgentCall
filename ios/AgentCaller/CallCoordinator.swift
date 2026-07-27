@@ -2,7 +2,7 @@ import AVFoundation
 import CallKit
 import OSLog
 
-final class CallCoordinator: NSObject, CXProviderDelegate, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegate, @unchecked Sendable {
+final class CallCoordinator: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
     private let provider: CXProvider
     private let logger = Logger(subsystem: "com.chirag.agentcaller", category: "CallKit")
     private let speechSynthesizer = AVSpeechSynthesizer()
@@ -35,19 +35,21 @@ final class CallCoordinator: NSObject, CXProviderDelegate, AVAudioPlayerDelegate
         update.supportsUngrouping = false
 
         provider.reportNewIncomingCall(with: call.id, update: update) { [weak self] error in
-            if let error {
-                #if DEBUG
-                print("CALLER_CALLKIT_REJECTED: \(error)")
-                #endif
-                self?.logger.error("Incoming call \(call.id, privacy: .public) rejected: \(error.localizedDescription, privacy: .public)")
-                self?.calls.removeValue(forKey: call.id)
-            } else {
-                #if DEBUG
-                print("CALLER_CALLKIT_REPORTED: \(call.id)")
-                #endif
-                self?.logger.info("Incoming call \(call.id, privacy: .public) reported successfully")
+            Task { @MainActor [weak self] in
+                if let error {
+                    #if DEBUG
+                    print("CALLER_CALLKIT_REJECTED: \(error)")
+                    #endif
+                    self?.logger.error("Incoming call \(call.id, privacy: .public) rejected: \(error.localizedDescription, privacy: .public)")
+                    self?.calls.removeValue(forKey: call.id)
+                } else {
+                    #if DEBUG
+                    print("CALLER_CALLKIT_REPORTED: \(call.id)")
+                    #endif
+                    self?.logger.info("Incoming call \(call.id, privacy: .public) reported successfully")
+                }
+                completion?()
             }
-            completion?()
         }
     }
 
@@ -164,3 +166,9 @@ final class CallCoordinator: NSObject, CXProviderDelegate, AVAudioPlayerDelegate
         activeCallID = nil
     }
 }
+
+#if compiler(>=6.4)
+extension CallCoordinator: @preconcurrency CXProviderDelegate, @preconcurrency AVSpeechSynthesizerDelegate {}
+#else
+extension CallCoordinator: CXProviderDelegate, AVSpeechSynthesizerDelegate {}
+#endif

@@ -16,7 +16,8 @@ test("sends the Worker-compatible APNs VoIP request and reuses its JWT", async (
     APNS_BUNDLE_ID: "com.chirag.agentcaller",
   };
   const requests = [];
-  const fetcher = async (url, init) => {
+  const fetcher = async function (url, init) {
+    assert.equal(this, undefined);
     requests.push({ url, init });
     return new Response(null, { status: 200, headers: { "apns-id": "push-id" } });
   };

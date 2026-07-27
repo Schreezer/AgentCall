@@ -7,6 +7,8 @@ import sys
 import urllib.error
 import urllib.request
 
+USER_AGENT = "AgentCall-Hermes/0.2"
+
 
 def main():
     parser = argparse.ArgumentParser(description="Pair Hermes with one Caller installation")
@@ -20,7 +22,7 @@ def main():
         f"{relay_url}/v1/pairings/claim",
         data=json.dumps({"pairing_code": args.code}).encode(),
         method="POST",
-        headers={"content-type": "application/json"},
+        headers={"content-type": "application/json", "user-agent": USER_AGENT},
     )
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
