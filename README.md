@@ -34,7 +34,8 @@ For the complete trust model and request lifecycle, see [ARCHITECTURE.md](ARCHIT
 | Path | Purpose |
 | --- | --- |
 | `ios/AgentCaller` | Native SwiftUI app, pairing UI, PushKit registration, CallKit handling, and audio playback |
-| `backend` | Node.js relay for pairing, scheduling, temporary audio storage, and APNs delivery |
+| `backend` | Local Node.js relay for development and compatibility testing |
+| `cloudflare` | Durable Cloudflare Worker relay using D1, R2, and a Durable Object scheduler |
 | `integrations/hermes/urgent-caller` | Reference Hermes skill with dependency-free Python pairing and call clients |
 | `HERMES_CALLER_SETUP_PROMPT.md` | Self-contained instructions that the iOS app can give to a user's agent |
 | `MAC_TEST_DEPLOYMENT.md` | Temporary Mac-hosted relay and physical-device testing notes |
@@ -89,6 +90,51 @@ Expected response:
 ```
 
 The relay must be reachable over HTTPS by both the iPhone and the agent. For temporary testing from a Mac, a Tailscale Funnel or another HTTPS tunnel can expose the local port. Use persistent hosting, durable storage, managed secrets, monitoring, and rate limiting before treating it as production infrastructure.
+
+### Deploy the Cloudflare relay
+
+The `cloudflare` implementation preserves the same HTTP API while replacing local files and process timers with managed storage:
+
+- D1 stores installations, hashed credentials, pairing codes, calls, rate limits, and idempotency records.
+- R2 stores installation-scoped audio attachments.
+- A Durable Object alarm delivers scheduled calls and removes expired audio.
+- Worker secrets hold the APNs Team ID, Key ID, and `.p8` signing key.
+
+Create the resources:
+
+```bash
+cd cloudflare
+npm install
+npx wrangler login
+```
+
+Wrangler automatically provisions the D1 database and R2 bucket declared in `cloudflare/wrangler.jsonc`; no account-specific resource IDs belong in source control. Configure the three APNs secrets:
+
+```bash
+npx wrangler secret put APNS_TEAM_ID
+npx wrangler secret put APNS_KEY_ID
+npx wrangler secret put APNS_PRIVATE_KEY
+```
+
+For `APNS_PRIVATE_KEY`, paste the complete contents of the `.p8` file, including its `BEGIN PRIVATE KEY` and `END PRIVATE KEY` lines. Confirm that `APNS_BUNDLE_ID` in `wrangler.jsonc` exactly matches the signed iOS app.
+
+Apply the database migration, verify the Worker bundle, and deploy:
+
+```bash
+npm run db:migrate:remote
+npm test
+npm run check
+npm run deploy
+```
+
+After deployment:
+
+1. Open the deployed `/health` endpoint and require `storageReady` and `apnsReady` to both be `true`.
+2. Set the iOS app's Caller relay URL to the deployed Worker URL.
+3. Register a physical development-signed iPhone and pair an agent.
+4. With permission, place one sandbox call and confirm the returned relay state reaches `delivered`.
+
+That final call is required production evidence: the unit test proves the ES256 token and APNs request shape, while only a deployed request proves Cloudflare negotiated a connection Apple accepted.
 
 ## Run the iOS app
 
@@ -179,6 +225,8 @@ Run the relay tests:
 
 ```bash
 npm test --prefix backend
+npm test --prefix cloudflare
+npm run check --prefix cloudflare
 ```
 
 Run the iOS tests from Xcode, or from the command line with an installed simulator:
