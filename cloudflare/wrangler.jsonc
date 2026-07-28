@@ -1,0 +1,56 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentcall-relay",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.05
+    }
+  },
+  "triggers": {
+    "crons": ["17 * * * *"]
+  },
+  "vars": {
+    "APNS_BUNDLE_ID": "com.chirag.agentcaller",
+    "PAIRING_TTL_SECONDS": "900",
+    "AUDIO_MAX_BYTES": "5000000",
+    "AUDIO_TTL_SECONDS": "3600"
+  },
+  "secrets": {
+    "required": ["APNS_TEAM_ID", "APNS_KEY_ID", "APNS_PRIVATE_KEY"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "AUDIO"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SCHEDULER",
+        "class_name": "RelayScheduler"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RelayScheduler"]
+    }
+  ]
+}

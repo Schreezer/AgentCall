@@ -10,6 +10,8 @@ import time
 import urllib.error
 import urllib.request
 
+USER_AGENT = "AgentCall-Hermes/0.2"
+
 
 def main():
     parser = argparse.ArgumentParser(description="Place or schedule a Caller call")
@@ -61,6 +63,7 @@ def main():
                     "content-type": content_type,
                     "idempotency-key": audio_idempotency_key,
                     "x-audio-filename": safe_filename,
+                    "user-agent": USER_AGENT,
                 },
             )
             with urllib.request.urlopen(upload_request, timeout=30) as response:
@@ -75,6 +78,7 @@ def main():
                 "authorization": f"Bearer {agent_token}",
                 "content-type": "application/json",
                 "idempotency-key": args.idempotency_key,
+                "user-agent": USER_AGENT,
             },
         )
         with urllib.request.urlopen(request, timeout=15) as response:
@@ -88,7 +92,7 @@ def main():
             time.sleep(min(1, max(deadline - time.monotonic(), 0)))
             status_request = urllib.request.Request(
                 f"{relay_url}/v1/calls/{result['id']}",
-                headers={"authorization": f"Bearer {agent_token}"},
+                headers={"authorization": f"Bearer {agent_token}", "user-agent": USER_AGENT},
             )
             with urllib.request.urlopen(status_request, timeout=15) as response:
                 result = json.loads(response.read().decode())

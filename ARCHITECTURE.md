@@ -60,6 +60,27 @@ The relay stores hashes of installation and agent credentials, not their plainte
 
 Before production, add database transactions, audited credential rotation/revocation, App Attest, per-installation quotas, encrypted call content, APNs invalid-token cleanup, and explicit call-event callbacks.
 
+## Cloudflare deployment
+
+The production-oriented relay target lives in `cloudflare/`:
+
+```text
+iPhone / agent
+      |
+      v
+Cloudflare Worker API
+      |---- D1: installations, credentials, calls, idempotency
+      |---- R2: short-lived audio bytes
+      |---- Durable Object alarm: scheduled delivery and expiry cleanup
+      `---- APNs HTTP/2 endpoint: VoIP push
+```
+
+Each installation has its own serialized Durable Object scheduler, avoiding a global delivery bottleneck. Calls remain authoritative in D1; each alarm queries and conditionally claims due rows for its installation before sending, so at-least-once alarm execution cannot send the same row twice. D1 unique constraints enforce installation-scoped call and audio idempotency.
+
+R2 lifecycle rules do not provide exact one-hour deletion. Each audio row therefore carries an authoritative `expires_at`: downloads fail closed after that instant, and the scheduler deletes both the R2 object and D1 metadata.
+
+The Worker creates APNs provider tokens with Web Crypto and sends through `fetch()`. The existing Node relay uses an explicit `node:http2` connection; Workers expose `node:http2` only as a non-functional compatibility stub. A real sandbox VoIP delivery from the deployed Worker is therefore a required release gate before switching the app's production relay URL.
+
 ## Audio and live conversation
 
 The MVP supports both on-device text-to-speech and short-lived uploaded speech files. The APNs payload carries only an opaque ID, never the audio bytes. A production relay should move encrypted attachments to object storage with lifecycle deletion. A live agent call should use the VoIP push only to ring; after answer, the app joins a WebRTC session controlled by the user-owned agent service.

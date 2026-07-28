@@ -104,13 +104,34 @@ final class ConnectionConfigurationTests: XCTestCase {
 
     func testLegacyPlaceholderMigratesToManagedRelay() {
         let suite = UserDefaults(suiteName: UUID().uuidString)!
+        let credentials = TestCredentialStore()
         suite.set("https://push.caller.example", forKey: "agentCaller.relayURL")
+        suite.set("legacy-installation", forKey: "agentCaller.installationID")
+        credentials.values["installation-secret"] = "legacy-secret"
         let subject = ConnectionConfiguration(
             defaults: suite,
-            credentials: TestCredentialStore(),
+            credentials: credentials,
             defaultRelayURL: "https://managed.caller.example"
         )
         XCTAssertEqual(subject.relayURL, "https://managed.caller.example")
+        XCTAssertNil(subject.installationID)
+        XCTAssertNil(subject.installationSecret)
+    }
+
+    func testLegacyMacRelayMigratesToManagedRelayAndClearsCredentials() {
+        let suite = UserDefaults(suiteName: UUID().uuidString)!
+        let credentials = TestCredentialStore()
+        suite.set("https://macbook-pro-4.tail38a470.ts.net/", forKey: "agentCaller.relayURL")
+        suite.set("legacy-installation", forKey: "agentCaller.installationID")
+        credentials.values["installation-secret"] = "legacy-secret"
+        let subject = ConnectionConfiguration(
+            defaults: suite,
+            credentials: credentials,
+            defaultRelayURL: "https://managed.caller.example"
+        )
+        XCTAssertEqual(subject.relayURL, "https://managed.caller.example")
+        XCTAssertNil(subject.installationID)
+        XCTAssertNil(subject.installationSecret)
     }
 
     func testAgentInstructionsUseManagedRelayAndNeverRequestAppleCredentials() {

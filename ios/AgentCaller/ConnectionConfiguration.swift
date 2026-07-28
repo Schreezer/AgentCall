@@ -33,7 +33,8 @@ final class ConnectionConfiguration: ObservableObject {
     private static let installationIDKey = "agentCaller.installationID"
     private static let installationSecretKey = "installation-secret"
     private static let legacyPlaceholderURL = "https://push.caller.example"
-    private static let fallbackRelayURL = "https://push.caller.example"
+    private static let legacyMacRelayURL = "https://macbook-pro-4.tail38a470.ts.net"
+    private static let fallbackRelayURL = "https://agentcall-relay.chiragmgg.workers.dev"
 
     init(
         defaults: UserDefaults = .standard,
@@ -47,9 +48,13 @@ final class ConnectionConfiguration: ObservableObject {
 
         let storedURL = defaults.string(forKey: Self.relayURLKey)
         if storedURL == nil
-            || storedURL == Self.legacyPlaceholderURL {
+            || storedURL.map(Self.isLegacyRelayURL) == true {
             relayURL = self.defaultRelayURL
             defaults.set(self.defaultRelayURL, forKey: Self.relayURLKey)
+            if storedURL != nil {
+                defaults.removeObject(forKey: Self.installationIDKey)
+                _ = credentials.remove(Self.installationSecretKey)
+            }
         } else {
             relayURL = storedURL ?? self.defaultRelayURL
         }
@@ -197,6 +202,11 @@ final class ConnectionConfiguration: ObservableObject {
     private func isLocalDevelopmentURL(_ url: URL) -> Bool {
         guard url.scheme?.lowercased() == "http" else { return false }
         return ["localhost", "127.0.0.1"].contains(url.host?.lowercased() ?? "")
+    }
+
+    private static func isLegacyRelayURL(_ value: String) -> Bool {
+        let normalized = value.trimmingCharacters(in: CharacterSet(charactersIn: "/").union(.whitespacesAndNewlines))
+        return [legacyPlaceholderURL, legacyMacRelayURL].contains(normalized)
     }
 }
 

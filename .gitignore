@@ -6,6 +6,10 @@ xcuserdata/
 backend/data/
 backend/.env
 backend/node_modules/
+cloudflare/.dev.vars
+cloudflare/.wrangler/
+cloudflare/dist/
+cloudflare/node_modules/
 *.p8
 *.mobileprovision
 

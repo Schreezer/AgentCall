@@ -20,7 +20,7 @@ targets:
         CFBundleDisplayName: Caller
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        CallerRelayURL: https://push.caller.example
+        CallerRelayURL: https://agentcall-relay.chiragmgg.workers.dev
         LSApplicationCategoryType: public.app-category.productivity
         UILaunchScreen: {}
         UIBackgroundModes:
