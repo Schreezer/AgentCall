@@ -24,6 +24,8 @@
 	<string>https://agentcall-relay.chiragmgg.workers.dev</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Caller uses the microphone only during a live conversation with your agent.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

@@ -14,10 +14,14 @@
 		80130123320211526C95720D /* ConnectionConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46DF6A4FE5F4CDAD72FA77FC /* ConnectionConfiguration.swift */; };
 		8A0FDC18565039B45ED5D805 /* IncomingCall.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7262E5F4AD2767721904F981 /* IncomingCall.swift */; };
 		8BB04FB27ABD62C254BC1FAC /* CallCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB9D3409104D81E3DEEC1254 /* CallCoordinator.swift */; };
+		93B6AC5C10468C268DBE473D /* GrokVoiceSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BB8F2EF75E8086506400E58 /* GrokVoiceSession.swift */; };
 		957F2B184857FB30AA060459 /* AgentSetupInstructions.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEF39272247BF60214A0BEF2 /* AgentSetupInstructions.swift */; };
 		A3E5DC05BB8F22EDA3D90BFC /* AgentCallerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9E51FD459E01545DCFFC6CA /* AgentCallerApp.swift */; };
+		ACFB47973A641C4D157905BE /* RealtimeAudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = E50A8BDB3472348304AF8F22 /* RealtimeAudioEngine.swift */; };
 		BFE72835A882B0597F91A3C7 /* PushManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC26C500D21B32B7498A8503 /* PushManager.swift */; };
+		C508A1EAA22C70C49A5AE2FC /* VoiceBootstrapClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BD487FFADA4E17941B2E7F0 /* VoiceBootstrapClient.swift */; };
 		CD5D079389BB406840EF1BD7 /* SecureStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA1843E09F7866CA18A41A09 /* SecureStore.swift */; };
+		FC425AEA00CA433F030C2146 /* HermesApprovals.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3C375C57AFBACC122956474 /* HermesApprovals.swift */; };
 		FEFBEF3D9CC2F17ACBABDABD /* CallerSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F87AF9411D79A5AA2EFAB24C /* CallerSettingsView.swift */; };
 /* End PBXBuildFile section */
 
@@ -32,6 +36,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		3BB8F2EF75E8086506400E58 /* GrokVoiceSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrokVoiceSession.swift; sourceTree = "<group>"; };
 		41C4271FB4949524CC6F4A9F /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		46DF6A4FE5F4CDAD72FA77FC /* ConnectionConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionConfiguration.swift; sourceTree = "<group>"; };
 		4B07010CC7FFC70B15F2D63F /* ConnectionConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionConfigurationTests.swift; sourceTree = "<group>"; };
@@ -39,6 +44,7 @@
 		66E4EA04E64A4C94B7A56C6B /* ConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionView.swift; sourceTree = "<group>"; };
 		7262E5F4AD2767721904F981 /* IncomingCall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncomingCall.swift; sourceTree = "<group>"; };
 		7DF97C6A4A405A68F94FCF37 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		8BD487FFADA4E17941B2E7F0 /* VoiceBootstrapClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceBootstrapClient.swift; sourceTree = "<group>"; };
 		AC26C500D21B32B7498A8503 /* PushManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushManager.swift; sourceTree = "<group>"; };
 		B9E51FD459E01545DCFFC6CA /* AgentCallerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCallerApp.swift; sourceTree = "<group>"; };
 		BB9D3409104D81E3DEEC1254 /* CallCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallCoordinator.swift; sourceTree = "<group>"; };
@@ -46,7 +52,9 @@
 		CEF39272247BF60214A0BEF2 /* AgentSetupInstructions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSetupInstructions.swift; sourceTree = "<group>"; };
 		D0EBBE46B1E251BF0EEAEB2D /* IncomingCallTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncomingCallTests.swift; sourceTree = "<group>"; };
 		DF0D60EB0139343478B029DA /* AgentCaller.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AgentCaller.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E50A8BDB3472348304AF8F22 /* RealtimeAudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeAudioEngine.swift; sourceTree = "<group>"; };
 		EA1843E09F7866CA18A41A09 /* SecureStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureStore.swift; sourceTree = "<group>"; };
+		F3C375C57AFBACC122956474 /* HermesApprovals.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesApprovals.swift; sourceTree = "<group>"; };
 		F87AF9411D79A5AA2EFAB24C /* CallerSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallerSettingsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -62,10 +70,14 @@
 				F87AF9411D79A5AA2EFAB24C /* CallerSettingsView.swift */,
 				46DF6A4FE5F4CDAD72FA77FC /* ConnectionConfiguration.swift */,
 				66E4EA04E64A4C94B7A56C6B /* ConnectionView.swift */,
+				3BB8F2EF75E8086506400E58 /* GrokVoiceSession.swift */,
+				F3C375C57AFBACC122956474 /* HermesApprovals.swift */,
 				7262E5F4AD2767721904F981 /* IncomingCall.swift */,
 				7DF97C6A4A405A68F94FCF37 /* Info.plist */,
 				AC26C500D21B32B7498A8503 /* PushManager.swift */,
+				E50A8BDB3472348304AF8F22 /* RealtimeAudioEngine.swift */,
 				EA1843E09F7866CA18A41A09 /* SecureStore.swift */,
+				8BD487FFADA4E17941B2E7F0 /* VoiceBootstrapClient.swift */,
 			);
 			name = AgentCaller;
 			path = ios/AgentCaller;
@@ -145,6 +157,11 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					A92049AC4B28B20C3F50D584 = {
+						DevelopmentTeam = UF4L3PL7UG;
+					};
+				};
 			};
 			buildConfigurationList = BDD8D0AF36E9D1D6B64447EC /* Build configuration list for PBXProject "AgentCaller" */;
 			compatibilityVersion = "Xcode 14.0";
@@ -187,9 +204,13 @@
 				FEFBEF3D9CC2F17ACBABDABD /* CallerSettingsView.swift in Sources */,
 				80130123320211526C95720D /* ConnectionConfiguration.swift in Sources */,
 				7E491E0ABAF39C4DE5FFACF3 /* ConnectionView.swift in Sources */,
+				93B6AC5C10468C268DBE473D /* GrokVoiceSession.swift in Sources */,
+				FC425AEA00CA433F030C2146 /* HermesApprovals.swift in Sources */,
 				8A0FDC18565039B45ED5D805 /* IncomingCall.swift in Sources */,
 				BFE72835A882B0597F91A3C7 /* PushManager.swift in Sources */,
+				ACFB47973A641C4D157905BE /* RealtimeAudioEngine.swift in Sources */,
 				CD5D079389BB406840EF1BD7 /* SecureStore.swift in Sources */,
+				C508A1EAA22C70C49A5AE2FC /* VoiceBootstrapClient.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -268,6 +289,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = ios/AgentCaller/AgentCaller.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = UF4L3PL7UG;
 				INFOPLIST_FILE = ios/AgentCaller/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -302,6 +324,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = ios/AgentCaller/AgentCaller.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = UF4L3PL7UG;
 				INFOPLIST_FILE = ios/AgentCaller/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

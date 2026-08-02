@@ -8,7 +8,8 @@ struct AgentCallerApp: App {
         WindowGroup {
             ConnectionView(
                 pushManager: appDelegate.pushManager,
-                callCoordinator: appDelegate.callCoordinator
+                callCoordinator: appDelegate.callCoordinator,
+                approvalStore: appDelegate.pushManager.approvalStore
             )
                 .environmentObject(appDelegate.configuration)
         }

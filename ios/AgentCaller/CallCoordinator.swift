@@ -1,8 +1,9 @@
-import AVFoundation
-import CallKit
+@preconcurrency import AVFoundation
+@preconcurrency import CallKit
 import OSLog
 
-final class CallCoordinator: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
+@MainActor
+final class CallCoordinator: NSObject, @unchecked Sendable {
     private let provider: CXProvider
     private let logger = Logger(subsystem: "com.chirag.agentcaller", category: "CallKit")
     private let speechSynthesizer = AVSpeechSynthesizer()
@@ -10,6 +11,8 @@ final class CallCoordinator: NSObject, AVAudioPlayerDelegate, @unchecked Sendabl
     private var audioDownloadTask: Task<Void, Never>?
     private var calls: [UUID: IncomingCall] = [:]
     private var activeCallID: UUID?
+    private var voiceSession: GrokVoiceSession?
+    weak var configuration: ConnectionConfiguration?
 
     override init() {
         let configuration = CXProviderConfiguration()
@@ -22,6 +25,17 @@ final class CallCoordinator: NSObject, AVAudioPlayerDelegate, @unchecked Sendabl
         super.init()
         provider.setDelegate(self, queue: .main)
         speechSynthesizer.delegate = self
+    }
+
+    func prepareMicrophonePermission() {
+        guard AVAudioApplication.shared.recordPermission == .undetermined else { return }
+        AVAudioApplication.requestRecordPermission { [logger] granted in
+            if granted {
+                logger.info("Microphone permission granted")
+            } else {
+                logger.error("Microphone permission denied; live calls will use the spoken-message fallback")
+            }
+        }
     }
 
     func reportIncoming(_ call: IncomingCall, completion: (@Sendable () -> Void)? = nil) {
@@ -54,6 +68,8 @@ final class CallCoordinator: NSObject, AVAudioPlayerDelegate, @unchecked Sendabl
     }
 
     func providerDidReset(_ provider: CXProvider) {
+        voiceSession?.stop()
+        voiceSession = nil
         audioDownloadTask?.cancel()
         audioDownloadTask = nil
         audioPlayer?.stop()
@@ -80,6 +96,8 @@ final class CallCoordinator: NSObject, AVAudioPlayerDelegate, @unchecked Sendabl
     }
 
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
+        voiceSession?.stop()
+        voiceSession = nil
         audioDownloadTask?.cancel()
         audioDownloadTask = nil
         audioPlayer?.stop()
@@ -92,15 +110,53 @@ final class CallCoordinator: NSObject, AVAudioPlayerDelegate, @unchecked Sendabl
 
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
         guard let activeCallID, let call = calls[activeCallID] else { return }
-        playAudioOrFallback(for: call)
+        if call.mode == .liveVoice {
+            startLiveVoice(for: call)
+        } else {
+            playAudioOrFallback(for: call)
+        }
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+        voiceSession?.stop()
+        voiceSession = nil
         audioDownloadTask?.cancel()
         audioDownloadTask = nil
         audioPlayer?.stop()
         audioPlayer = nil
         speechSynthesizer.stopSpeaking(at: .immediate)
+    }
+
+    private func startLiveVoice(for call: IncomingCall) {
+        guard AVAudioApplication.shared.recordPermission == .granted else {
+            logger.error("Live voice unavailable because microphone permission is not granted")
+            playAudioOrFallback(for: call)
+            return
+        }
+        guard let configuration,
+              let relayURL = configuration.validatedRelayURL,
+              let installationID = configuration.installationID,
+              let installationSecret = configuration.installationSecret else {
+            logger.error("Live voice unavailable because Caller credentials are missing")
+            playAudioOrFallback(for: call)
+            return
+        }
+        let voiceSession = GrokVoiceSession()
+        voiceSession.onFailure = { [weak self] _ in
+            guard let self, self.activeCallID == call.id else { return }
+            self.voiceSession?.stop()
+            self.voiceSession = nil
+            self.playAudioOrFallback(for: call)
+        }
+        self.voiceSession = voiceSession
+        voiceSession.start(
+            callID: call.id,
+            client: VoiceBootstrapClient(
+                relayURL: relayURL,
+                installationID: installationID,
+                installationSecret: installationSecret
+            )
+        )
     }
 
     private func playAudioOrFallback(for call: IncomingCall) {
@@ -161,14 +217,12 @@ final class CallCoordinator: NSObject, AVAudioPlayerDelegate, @unchecked Sendabl
 
     private func finishActiveCall() {
         guard let id = activeCallID else { return }
+        voiceSession?.stop()
+        voiceSession = nil
         provider.reportCall(with: id, endedAt: Date(), reason: .remoteEnded)
         calls.removeValue(forKey: id)
         activeCallID = nil
     }
 }
 
-#if compiler(>=6.4)
-extension CallCoordinator: @preconcurrency CXProviderDelegate, @preconcurrency AVSpeechSynthesizerDelegate {}
-#else
-extension CallCoordinator: CXProviderDelegate, AVSpeechSynthesizerDelegate {}
-#endif
+extension CallCoordinator: @preconcurrency CXProviderDelegate, @preconcurrency AVSpeechSynthesizerDelegate, @preconcurrency AVAudioPlayerDelegate {}

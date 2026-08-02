@@ -5,6 +5,7 @@ import UIKit
 struct ConnectionView: View {
     let pushManager: PushManager
     let callCoordinator: CallCoordinator
+    @ObservedObject var approvalStore: HermesApprovalStore
 
     @EnvironmentObject private var configuration: ConnectionConfiguration
     @Environment(\.colorScheme) private var colorScheme
@@ -20,7 +21,12 @@ struct ConnectionView: View {
                 background
 
                 ScrollView {
-                    homeContent
+                    VStack(spacing: 18) {
+                        if !approvalStore.approvals.isEmpty {
+                            approvalInbox
+                        }
+                        homeContent
+                    }
                         .frame(maxWidth: 520)
                         .padding(.horizontal, 20)
                         .padding(.top, 18)
@@ -52,6 +58,44 @@ struct ConnectionView: View {
             }
         }
         .animation(.snappy(duration: 0.45), value: configuration.homeState(at: now))
+    }
+
+    private var approvalInbox: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Hermes needs confirmation", systemImage: "checkmark.shield.fill")
+                .font(.headline)
+                .foregroundStyle(.orange)
+            ForEach(approvalStore.approvals) { approval in
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(approval.details.displayText)
+                        .font(.subheadline)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        ForEach(approval.choices, id: \.self) { choice in
+                            approvalButton(approval, choice: choice)
+                        }
+                    }
+                }
+                .padding(14)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background, in: RoundedRectangle(cornerRadius: 24))
+        .accessibilityIdentifier("hermes-approval-inbox")
+    }
+
+    @ViewBuilder
+    private func approvalButton(_ approval: HermesApproval, choice: String) -> some View {
+        let button = Button(choice.replacingOccurrences(of: "_", with: " ").capitalized) {
+            Task { _ = await approvalStore.answer(approval, choice: choice) }
+        }
+        if choice == "deny" {
+            button.buttonStyle(.bordered)
+        } else {
+            button.buttonStyle(.borderedProminent)
+        }
     }
 
     private var background: some View {

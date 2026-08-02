@@ -10,8 +10,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        callCoordinator.configuration = configuration
         pushManager.configuration = configuration
+        pushManager.approvalStore.configuration = configuration
         pushManager.start()
+        application.registerForRemoteNotifications()
+        callCoordinator.prepareMicrophonePermission()
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--preview-call") {
             print("CALLER_PREVIEW_SCHEDULED")
@@ -33,5 +37,28 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         pushManager.registerCurrentTokenIfPossible()
+        pushManager.refreshApprovals()
+    }
+
+    func application(
+        _ application: UIApplication,
+        didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+    ) {
+        pushManager.didRegisterAlertToken(deviceToken)
+    }
+
+    func application(
+        _ application: UIApplication,
+        didFailToRegisterForRemoteNotificationsWithError error: Error
+    ) {
+        pushManager.didFailToRegisterAlertToken(error)
+    }
+
+    func application(
+        _ application: UIApplication,
+        didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+        fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        pushManager.didReceiveAlertNotification(userInfo, completion: completionHandler)
     }
 }

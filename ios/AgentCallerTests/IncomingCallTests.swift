@@ -48,4 +48,13 @@ final class IncomingCallTests: XCTestCase {
         XCTAssertNil(request)
         XCTAssertNil(try XCTUnwrap(IncomingCall(payload: payload)).audioRequest)
     }
+
+    func testLiveVoiceModeIsPreservedFromPushPayload() throws {
+        let call = try XCTUnwrap(IncomingCall(payload: [
+            "call_id": UUID().uuidString,
+            "message": "Hermes needs a decision",
+            "mode": "live_voice",
+        ]))
+        XCTAssertEqual(call.mode, .liveVoice)
+    }
 }

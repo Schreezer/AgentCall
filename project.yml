@@ -21,6 +21,7 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CallerRelayURL: https://agentcall-relay.chiragmgg.workers.dev
+        NSMicrophoneUsageDescription: Caller uses the microphone only during a live conversation with your agent.
         LSApplicationCategoryType: public.app-category.productivity
         UILaunchScreen: {}
         UIBackgroundModes:
@@ -30,6 +31,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.chirag.agentcaller
+        DEVELOPMENT_TEAM: UF4L3PL7UG
         CODE_SIGN_ENTITLEMENTS: ios/AgentCaller/AgentCaller.entitlements
         TARGETED_DEVICE_FAMILY: "1"
     scheme:

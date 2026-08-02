@@ -5,10 +5,12 @@ import UIKit
 @MainActor
 final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
     weak var configuration: ConnectionConfiguration?
+    let approvalStore = HermesApprovalStore()
 
     private let callCoordinator: CallCoordinator
     private var registry: PKPushRegistry?
     private var token: String?
+    private var alertToken: String?
 
     init(callCoordinator: CallCoordinator) {
         self.callCoordinator = callCoordinator
@@ -39,6 +41,7 @@ final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
 
         let body = DeviceRegistration(
             token: token,
+            alertToken: alertToken,
             platform: "ios",
             environment: isDebugBuild ? "sandbox" : "production",
             deviceName: UIDevice.current.name
@@ -150,6 +153,32 @@ final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
         }
     }
 
+    func didRegisterAlertToken(_ data: Data) {
+        alertToken = data.map { String(format: "%02x", $0) }.joined()
+        registerCurrentTokenIfPossible()
+    }
+
+    func didFailToRegisterAlertToken(_ error: Error) {
+        // VoIP calls remain available. The approval inbox is refreshed whenever the app opens.
+    }
+
+    func didReceiveAlertNotification(
+        _ userInfo: [AnyHashable: Any],
+        completion: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        guard userInfo["event"] as? String == "hermes_approval_required" else {
+            completion(.noData)
+            return
+        }
+        approvalStore.refresh()
+        completion(.newData)
+    }
+
+    func refreshApprovals() {
+        approvalStore.configuration = configuration
+        approvalStore.refresh()
+    }
+
     func pushRegistry(_ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType) {
         token = pushCredentials.token.map { String(format: "%02x", $0) }.joined()
         configuration?.markPushTokenAvailable()
@@ -200,12 +229,14 @@ private final class PushCompletion: @unchecked Sendable {
 
 private struct DeviceRegistration: Encodable {
     let token: String
+    let alertToken: String?
     let platform: String
     let environment: String
     let deviceName: String
 
     enum CodingKeys: String, CodingKey {
         case token, platform, environment
+        case alertToken = "alert_token"
         case deviceName = "device_name"
     }
 }
