@@ -24,6 +24,9 @@ export function validIdempotencyKey(value) {
 export function validateDevice(body) {
   if (!body || typeof body !== "object") return "body_required";
   if (!/^[0-9a-f]{32,}$/i.test(body.token ?? "")) return "invalid_device_token";
+  if (body.alert_token != null && !/^[0-9a-f]{32,}$/i.test(body.alert_token)) {
+    return "invalid_alert_device_token";
+  }
   if (body.platform !== "ios") return "unsupported_platform";
   if (!["sandbox", "production"].includes(body.environment)) return "invalid_environment";
   if (
@@ -52,12 +55,41 @@ export function validateCall(body, now = Date.now()) {
   if (timestamp > now + 366 * 24 * 60 * 60 * 1000) {
     return { error: "scheduled_at_too_far_in_future" };
   }
+  const mode = body.mode ?? "message";
+  if (!["message", "live_voice"].includes(mode)) return { error: "invalid_call_mode" };
+  let callContext = null;
+  let originHermesSessionID = null;
+  if (mode === "live_voice") {
+    if (!body.call_context || typeof body.call_context !== "object") {
+      return { error: "live_voice_call_context_required" };
+    }
+    const fields = ["reason", "relevant_context", "desired_outcome", "urgency"];
+    callContext = {};
+    for (const field of fields) {
+      const value = body.call_context[field];
+      if (typeof value !== "string" || !value.trim() || value.length > 2_000) {
+        return { error: `invalid_call_context_${field}` };
+      }
+      callContext[field] = value.trim();
+    }
+    originHermesSessionID = String(body.origin_hermes_session_id ?? "").trim();
+    if (
+      !originHermesSessionID ||
+      originHermesSessionID.length > 240 ||
+      /[\r\n\0]/.test(originHermesSessionID)
+    ) {
+      return { error: "invalid_origin_hermes_session_id" };
+    }
+  }
   return {
     value: {
       message,
       callerName,
       audioID,
       scheduledAt: Math.max(timestamp, now),
+      mode,
+      callContext,
+      originHermesSessionID,
     },
   };
 }
@@ -127,6 +159,7 @@ export function publicCall(row) {
     scheduled_at: new Date(row.scheduled_at).toISOString(),
     delivered_at: row.delivered_at ? new Date(row.delivered_at).toISOString() : null,
     delivery_errors: parseErrors(row.delivery_errors),
+    mode: row.mode ?? "message",
   };
 }
 

@@ -17,8 +17,13 @@ import {
   validateDevice,
 } from "./core.js";
 import { RelayScheduler } from "./scheduler.js";
+import { HermesInstallationCoordinator } from "./hermes-installation-coordinator.js";
+import { HermesOperationWorkflow } from "./hermes-operation-workflow.js";
+import { handleMcp } from "./mcp.js";
+import { createVoiceBootstrap, revokeVoiceSession } from "./voice-bootstrap.js";
+import { HermesClient } from "./hermes-client.js";
 
-export { RelayScheduler };
+export { RelayScheduler, HermesInstallationCoordinator, HermesOperationWorkflow };
 
 const JSON_BODY_LIMIT = 16_384;
 const DEFAULT_AUDIO_MAX_BYTES = 5_000_000;
@@ -27,9 +32,9 @@ const DEFAULT_PAIRING_TTL_SECONDS = 900;
 
 /** @type {ExportedHandler<Env>} */
 const worker = {
-  async fetch(request, env) {
+  async fetch(request, env, context) {
     try {
-      return await route(request, env);
+      return await route(request, env, context);
     } catch (error) {
       console.error(
         JSON.stringify({
@@ -50,7 +55,7 @@ const worker = {
 
 export default worker;
 
-async function route(request, env) {
+async function route(request, env, context) {
   const url = new URL(request.url);
 
   if (request.method === "GET" && url.pathname === "/health") {
@@ -67,6 +72,8 @@ async function route(request, env) {
       ),
     });
   }
+
+  if (url.pathname === "/mcp") return handleMcp(request, env, context);
 
   if (request.method === "POST" && url.pathname === "/v1/installations") {
     if (!(await allowRate(env, `install:${clientIP(request)}`, 20))) return rateLimited();
@@ -86,10 +93,10 @@ async function route(request, env) {
     const now = Date.now();
     await env.DB.prepare(
       `UPDATE installations
-          SET device_token = ?2, environment = ?3, device_name = ?4, updated_at = ?5
+          SET device_token = ?2, alert_device_token = ?3, environment = ?4, device_name = ?5, updated_at = ?6
         WHERE id = ?1`,
     )
-      .bind(installation.id, body.token, body.environment, body.device_name ?? null, now)
+      .bind(installation.id, body.token, body.alert_token ?? installation.alert_device_token ?? null, body.environment, body.device_name ?? null, now)
       .run();
     return json(200, publicInstallation({ ...installation, ...body, updated_at: now }));
   }
@@ -105,6 +112,45 @@ async function route(request, env) {
     );
     if (!installation) return json(401, { error: "invalid_installation_credential" });
     return downloadAudio(env, installation.id, audioDownloadMatch[2]);
+  }
+
+  const bootstrapMatch = url.pathname.match(
+    /^\/v1\/installations\/([0-9a-f-]+)\/calls\/([0-9a-f-]+)\/voice-bootstrap$/i,
+  );
+  if (request.method === "POST" && bootstrapMatch) {
+    const installation = await authorizeInstallation(env, bootstrapMatch[1], bearerToken(request));
+    if (!installation) return json(401, { error: "invalid_installation_credential" });
+    if (!(await allowRate(env, `voice-bootstrap:${installation.id}`, 10))) return rateLimited();
+    return createVoiceBootstrap(request, env, installation, bootstrapMatch[2]);
+  }
+
+  const revokeMatch = url.pathname.match(
+    /^\/v1\/installations\/([0-9a-f-]+)\/voice-sessions\/([0-9a-f-]+)$/i,
+  );
+  if (request.method === "DELETE" && revokeMatch) {
+    const installation = await authorizeInstallation(env, revokeMatch[1], bearerToken(request));
+    if (!installation) return json(401, { error: "invalid_installation_credential" });
+    await revokeVoiceSession(env, installation.id, revokeMatch[2]);
+    return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+  }
+
+  const approvalMatch = url.pathname.match(
+    /^\/v1\/installations\/([0-9a-f-]+)\/hermes-operations\/(voiceop_[0-9a-f]{32})\/approval$/i,
+  );
+  if (approvalMatch && ["GET", "POST"].includes(request.method)) {
+    const installation = await authorizeInstallation(env, approvalMatch[1], bearerToken(request));
+    if (!installation) return json(401, { error: "invalid_installation_credential" });
+    if (request.method === "GET") return getHermesApproval(env, installation.id, approvalMatch[2]);
+    return answerHermesApproval(request, env, installation.id, approvalMatch[2]);
+  }
+
+  const inboxMatch = url.pathname.match(
+    /^\/v1\/installations\/([0-9a-f-]+)\/hermes-approvals$/i,
+  );
+  if (request.method === "GET" && inboxMatch) {
+    const installation = await authorizeInstallation(env, inboxMatch[1], bearerToken(request));
+    if (!installation) return json(401, { error: "invalid_installation_credential" });
+    return listHermesApprovals(env, installation.id);
   }
 
   const installationMatch = url.pathname.match(/^\/v1\/installations\/([0-9a-f-]+)$/i);
@@ -197,13 +243,14 @@ async function createInstallation(env, device) {
   };
   await env.DB.prepare(
     `INSERT INTO installations (
-       id, installation_secret_hash, device_token, environment, device_name, created_at, updated_at
-     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)`,
+       id, installation_secret_hash, device_token, alert_device_token, environment, device_name, created_at, updated_at
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)`,
   )
     .bind(
       id,
       row.installation_secret_hash,
       device.token,
+      device.alert_token ?? null,
       device.environment,
       device.device_name ?? null,
       now,
@@ -389,11 +436,13 @@ async function createCall(request, env, installation) {
 
   const id = crypto.randomUUID();
   const now = Date.now();
+  const requestHash = await hashCredential(JSON.stringify(input));
   const inserted = await env.DB.prepare(
     `INSERT OR IGNORE INTO calls (
        id, installation_id, caller_name, message, audio_id, scheduled_at,
-       status, idempotency_key, created_at, delivery_errors
-     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'scheduled', ?7, ?8, '[]')`,
+       status, idempotency_key, created_at, delivery_errors, mode,
+       call_context_json, origin_hermes_session_id, request_hash
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'scheduled', ?7, ?8, '[]', ?9, ?10, ?11, ?12)`,
   )
     .bind(
       id,
@@ -404,6 +453,10 @@ async function createCall(request, env, installation) {
       input.scheduledAt,
       idempotencyKey,
       now,
+      input.mode,
+      input.callContext ? JSON.stringify(input.callContext) : null,
+      input.originHermesSessionID,
+      requestHash,
     )
     .run();
   const created = inserted.meta.changes > 0;
@@ -412,6 +465,10 @@ async function createCall(request, env, installation) {
   )
     .bind(installation.id, idempotencyKey)
     .first();
+
+  if (!created && call.request_hash && call.request_hash !== requestHash) {
+    return json(409, { error: "idempotency_key_reused_with_different_call" });
+  }
 
   await notifyScheduler(
     env,
@@ -434,6 +491,88 @@ async function deleteInstallation(env, installationID) {
     env.DB.prepare("DELETE FROM audio WHERE installation_id = ?1").bind(installationID),
     env.DB.prepare("DELETE FROM installations WHERE id = ?1").bind(installationID),
   ]);
+}
+
+async function getHermesApproval(env, installationID, operationID) {
+  const approval = await env.DB.prepare(
+    `SELECT operation_id, notification_id, details_json, choices_json, status, created_at, expires_at
+       FROM hermes_approvals
+      WHERE operation_id = ?1 AND installation_id = ?2`,
+  ).bind(operationID, installationID).first();
+  if (!approval) return json(404, { error: "approval_not_found" });
+  if (approval.status === "pending" && approval.expires_at <= Date.now()) {
+    await env.DB.prepare("UPDATE hermes_approvals SET status = 'expired' WHERE operation_id = ?1")
+      .bind(operationID).run();
+    approval.status = "expired";
+  }
+  return json(200, publicApproval(approval));
+}
+
+async function listHermesApprovals(env, installationID) {
+  await env.DB.prepare(
+    `UPDATE hermes_approvals SET status = 'expired'
+      WHERE installation_id = ?1 AND status = 'pending' AND expires_at <= ?2`,
+  ).bind(installationID, Date.now()).run();
+  const rows = await env.DB.prepare(
+    `SELECT operation_id, notification_id, details_json, choices_json, status, created_at, expires_at
+       FROM hermes_approvals
+      WHERE installation_id = ?1 AND status = 'pending'
+      ORDER BY created_at DESC LIMIT 50`,
+  ).bind(installationID).all();
+  return json(200, { approvals: rows.results.map(publicApproval) });
+}
+
+async function answerHermesApproval(request, env, installationID, operationID) {
+  const approval = await env.DB.prepare(
+    `SELECT a.*, o.hermes_run_id
+       FROM hermes_approvals a
+       JOIN hermes_operations o ON o.id = a.operation_id
+      WHERE a.operation_id = ?1 AND a.installation_id = ?2`,
+  ).bind(operationID, installationID).first();
+  if (!approval) return json(404, { error: "approval_not_found" });
+  if (approval.status !== "pending") return json(409, { error: `approval_${approval.status}` });
+  if (approval.expires_at <= Date.now()) {
+    await env.DB.prepare("UPDATE hermes_approvals SET status = 'expired' WHERE operation_id = ?1")
+      .bind(operationID).run();
+    return json(410, { error: "approval_expired" });
+  }
+  const body = await readJSON(request);
+  const choices = parseJSON(approval.choices_json, []);
+  if (typeof body.choice !== "string" || !choices.includes(body.choice)) {
+    return json(400, { error: "invalid_approval_choice", choices });
+  }
+  if (!approval.hermes_run_id) return json(409, { error: "hermes_run_not_ready" });
+  await new HermesClient(env).answerApproval(approval.hermes_run_id, body.choice);
+  const status = body.choice === "deny" ? "denied" : "approved";
+  await env.DB.prepare(
+    `UPDATE hermes_approvals SET status = ?2, responded_at = ?3
+      WHERE operation_id = ?1 AND status = 'pending'`,
+  ).bind(operationID, status, Date.now()).run();
+  await env.HERMES_COORDINATOR.getByName(installationID).updateOperation(operationID, {
+    status: body.choice === "deny" ? "failed" : "running",
+    approvalResolvedAt: Date.now(),
+  });
+  return json(200, { operation_id: operationID, status, choice: body.choice });
+}
+
+function publicApproval(row) {
+  return {
+    operation_id: row.operation_id,
+    notification_id: row.notification_id,
+    details: parseJSON(row.details_json, {}),
+    choices: parseJSON(row.choices_json, []),
+    status: row.status,
+    created_at: new Date(row.created_at).toISOString(),
+    expires_at: new Date(row.expires_at).toISOString(),
+  };
+}
+
+function parseJSON(value, fallback) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
 }
 
 async function authorizeInstallation(env, installationID, secret) {

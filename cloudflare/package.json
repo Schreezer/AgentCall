@@ -15,13 +15,19 @@
     "check": "wrangler types --check --include-runtime false && tsc --noEmit && wrangler deploy --dry-run --outdir dist && wrangler check startup --outfile dist/worker-startup.cpuprofile",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "smoke:live-mcp": "node scripts/live-mcp-smoke.mjs"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.18.8",
-    "@cloudflare/workers-types": "^5.20260727.1",
+    "@cloudflare/workers-types": "^5.20260801.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10",
-    "wrangler": "4.114.0"
+    "wrangler": "^4.118.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "agents": "^0.20.1",
+    "zod": "^4.4.3"
   }
 }

@@ -41,8 +41,32 @@ test("normalizes a call and preserves its audio attachment", () => {
       callerName: "PersonalClaw",
       audioID: "123e4567-e89b-42d3-a456-426614174000",
       scheduledAt: now + 60_000,
+      mode: "message",
+      callContext: null,
+      originHermesSessionID: null,
     },
   });
+});
+
+test("validates and normalizes a live Hermes voice call", () => {
+  const result = validateCall({
+    mode: "live_voice",
+    message: "Hermes needs your decision",
+    call_context: {
+      reason: "A choice is time sensitive",
+      relevant_context: "Option A is cheaper; option B is faster",
+      desired_outcome: "Choose A or B",
+      urgency: "important",
+    },
+    origin_hermes_session_id: "session-123",
+  });
+  assert.equal(result.value.mode, "live_voice");
+  assert.equal(result.value.callContext.reason, "A choice is time sensitive");
+  assert.equal(result.value.originHermesSessionID, "session-123");
+  assert.equal(
+    validateCall({ mode: "live_voice", message: "missing briefing" }).error,
+    "live_voice_call_context_required",
+  );
 });
 
 test("rejects invalid call and upload inputs", () => {

@@ -4,6 +4,7 @@ import {
   runInDurableObject,
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { hashCredential } from "../src/core.js";
 
 describe("Cloudflare relay", () => {
   it("runs registration, pairing, audio, idempotency, and alarm delivery", async () => {
@@ -122,6 +123,133 @@ describe("Cloudflare relay", () => {
     });
     expect(recovered.body.status).toBe("delivered");
   });
+
+  it("authenticates the stateless MCP endpoint and preserves operation scope", async () => {
+    const installationID = crypto.randomUUID();
+    const callID = crypto.randomUUID();
+    const voiceSessionID = crypto.randomUUID();
+    const token = "mcp_test_token_123456789";
+    const operationID = `voiceop_${"a".repeat(32)}`;
+    const now = Date.now();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO installations
+          (id, installation_secret_hash, device_token, environment, created_at, updated_at)
+         VALUES (?1, 'hash', ?2, 'sandbox', ?3, ?3)`,
+      ).bind(installationID, "ab".repeat(32), now),
+      env.DB.prepare(
+        `INSERT INTO calls
+          (id, installation_id, caller_name, message, scheduled_at, status, idempotency_key,
+           created_at, delivery_errors, mode, call_context_json, origin_hermes_session_id, request_hash)
+         VALUES (?1, ?2, 'Hermes', 'Reason', ?3, 'delivered', 'mcp-call', ?3, '[]',
+                 'live_voice', '{}', 'origin-session', 'hash')`,
+      ).bind(callID, installationID, now),
+      env.DB.prepare(
+        `INSERT INTO voice_sessions
+          (id, installation_id, call_id, mcp_token_hash, origin_hermes_session_id, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, 'origin-session', ?5, ?6)`,
+      ).bind(voiceSessionID, installationID, callID, await hashCredential(token), now, now + 60_000),
+      env.DB.prepare(
+        `INSERT INTO hermes_operations
+          (id, installation_id, call_id, voice_session_id, workflow_id, replay_key, request_hash,
+           status, hermes_session_id, result_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?1, 'replay', 'hash', 'answered', 'origin-session', ?5, ?6, ?6)`,
+      ).bind(operationID, installationID, callID, voiceSessionID, JSON.stringify({ answer: "Verified answer" }), now),
+    ]);
+    const coordinator = env.HERMES_COORDINATOR.getByName(installationID);
+    await runInDurableObject(coordinator, async (_instance, state) => {
+      await state.storage.put(`operation:${operationID}`, {
+        id: operationID,
+        installationID,
+        callID,
+        voiceSessionID,
+        workflowID: operationID,
+        replayKey: "replay",
+        requestHash: "hash",
+        status: "answered",
+        hermesSessionID: "origin-session",
+        result: { answer: "Verified answer" },
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+
+    const unauthorized = await mcpRequest({
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1" } },
+    });
+    expect(unauthorized.status).toBe(401);
+
+    const initialized = await mcpRequest({
+      id: 2,
+      method: "initialize",
+      params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1" } },
+    }, token);
+    expect(initialized.status).toBe(200);
+    expect(initialized.body.result.serverInfo.name).toBe("caller-hermes");
+
+    const listed = await mcpRequest({ id: 3, method: "tools/list", params: {} }, token);
+    expect(listed.body.result.tools.map((tool) => tool.name)).toEqual([
+      "ask_hermes",
+      "check_hermes_task",
+    ]);
+
+    const checked = await mcpRequest({
+      id: 4,
+      method: "tools/call",
+      params: { name: "check_hermes_task", arguments: { operation_id: operationID } },
+    }, token);
+    expect(checked.body.result.structuredContent).toMatchObject({
+      status: "answered",
+      answer: "Verified answer",
+      hermes_session_id: "origin-session",
+    });
+  });
+
+  it("mints a call-scoped xAI bootstrap without exposing permanent credentials", async () => {
+    const registration = await requestJSON("/v1/installations", {
+      method: "POST",
+      body: {
+        token: "cd".repeat(32),
+        alert_token: "ef".repeat(32),
+        platform: "ios",
+        environment: "sandbox",
+      },
+    });
+    const pairing = await requestJSON("/v1/pairings/claim", {
+      method: "POST",
+      body: { pairing_code: registration.body.pairing_code },
+    });
+    const call = await requestJSON("/v1/calls", {
+      method: "POST",
+      token: pairing.body.agent_token,
+      idempotencyKey: "live-voice-call-test-01",
+      body: {
+        mode: "live_voice",
+        message: "Hermes needs your decision",
+        call_context: {
+          reason: "A decision is due",
+          relevant_context: "The relevant facts",
+          desired_outcome: "Choose an option",
+          urgency: "important",
+        },
+        origin_hermes_session_id: "session-origin-1",
+      },
+    });
+    const bootstrap = await requestJSON(
+      `/v1/installations/${registration.body.installation_id}/calls/${call.body.id}/voice-bootstrap`,
+      { method: "POST", token: registration.body.installation_secret, body: {} },
+    );
+    expect(bootstrap.status).toBe(200);
+    expect(bootstrap.body.xai.ephemeral_token).toBe("ephemeral-only");
+    expect(bootstrap.body.session.tools[0]).toMatchObject({
+      type: "mcp",
+      allowed_tools: ["ask_hermes", "check_hermes_task"],
+    });
+    expect(bootstrap.body.session.instructions).toContain("A decision is due");
+    expect(JSON.stringify(bootstrap.body)).not.toContain("XAI_API_KEY");
+  });
 });
 
 async function requestJSON(
@@ -137,5 +265,27 @@ async function requestJSON(
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  return { status: response.status, body: await response.json() };
+  const text = await response.text();
+  const jsonText = response.headers.get("content-type")?.includes("text/event-stream")
+    ? text.split("\n").find((line) => line.startsWith("data: "))?.slice(6)
+    : text;
+  return { status: response.status, body: JSON.parse(jsonText) };
+}
+
+async function mcpRequest(body, token) {
+  const headers = new Headers({
+    accept: "application/json, text/event-stream",
+    "content-type": "application/json",
+  });
+  if (token) headers.set("authorization", `Bearer ${token}`);
+  const response = await exports.default.fetch("https://relay.test/mcp", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ jsonrpc: "2.0", ...body }),
+  });
+  const text = await response.text();
+  const jsonText = response.headers.get("content-type")?.includes("text/event-stream")
+    ? text.split("\n").find((line) => line.startsWith("data: "))?.slice(6)
+    : text;
+  return { status: response.status, body: JSON.parse(jsonText) };
 }

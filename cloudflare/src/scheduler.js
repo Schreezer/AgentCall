@@ -19,6 +19,7 @@ export class RelayScheduler extends DurableObject {
   async drain() {
     const installationID = this.installationID();
     await this.deliverDue(installationID);
+    await this.deliverApprovals(installationID);
     await this.scheduleNextAlarm(installationID);
   }
 
@@ -29,12 +30,19 @@ export class RelayScheduler extends DurableObject {
   async maintenance() {
     const installationID = this.installationID();
     await this.deliverDue(installationID);
+    await this.deliverApprovals(installationID);
     await this.cleanupExpiredAudio(installationID);
     await this.scheduleNextAlarm(installationID);
   }
 
   async cancel() {
     await this.ctx.storage.deleteAlarm();
+  }
+
+  async approval() {
+    const installationID = this.installationID();
+    await this.deliverApprovals(installationID);
+    await this.scheduleNextAlarm(installationID);
   }
 
   async alarm() {
@@ -159,6 +167,54 @@ export class RelayScheduler extends DurableObject {
     }
   }
 
+  async deliverApprovals(installationID) {
+    const rows = await this.env.DB.prepare(
+      `SELECT * FROM approval_outbox
+        WHERE installation_id = ?1 AND status = 'pending'
+        ORDER BY created_at LIMIT 20`,
+    ).bind(installationID).all();
+    if (!rows.results.length) return;
+    const device = await this.env.DB.prepare(
+      `SELECT alert_device_token, environment FROM installations WHERE id = ?1`,
+    ).bind(installationID).first();
+    for (const row of rows.results) {
+      const claimed = await this.env.DB.prepare(
+        `UPDATE approval_outbox
+            SET status = 'delivering', attempts = attempts + 1
+          WHERE notification_id = ?1 AND status = 'pending'
+          RETURNING *`,
+      ).bind(row.notification_id).first();
+      if (!claimed) continue;
+      const approval = await this.env.DB.prepare(
+        `SELECT expires_at FROM hermes_approvals WHERE operation_id = ?1`,
+      ).bind(claimed.operation_id).first();
+      if (!device?.alert_device_token || !approval || Number(approval.expires_at) <= Date.now()) {
+        await this.env.DB.prepare(
+          `UPDATE approval_outbox SET status = 'failed', last_error = ?2 WHERE notification_id = ?1`,
+        ).bind(claimed.notification_id, "No standard APNs token or approval expired").run();
+        continue;
+      }
+      try {
+        await this.apns.sendBackground(device, {
+          callID: (await this.env.DB.prepare("SELECT call_id FROM hermes_operations WHERE id = ?1").bind(claimed.operation_id).first())?.call_id,
+          operationID: claimed.operation_id,
+          notificationID: claimed.notification_id,
+          expiresAt: Number(approval.expires_at),
+        });
+        await this.env.DB.prepare(
+          `UPDATE approval_outbox SET status = 'delivered', delivered_at = ?2, last_error = NULL
+            WHERE notification_id = ?1`,
+        ).bind(claimed.notification_id, Date.now()).run();
+      } catch (error) {
+        const terminal = Number(claimed.attempts) >= 3;
+        await this.env.DB.prepare(
+          `UPDATE approval_outbox SET status = ?2, last_error = ?3 WHERE notification_id = ?1`,
+        ).bind(claimed.notification_id, terminal ? "failed" : "pending", error?.message ?? String(error)).run();
+        if (!terminal) await this.ctx.storage.setAlarm(Date.now() + 30_000);
+      }
+    }
+  }
+
   async scheduleNextAlarm(installationID) {
     const next = await this.env.DB.prepare(
       `SELECT MIN(due_at) AS due_at
@@ -170,6 +226,10 @@ export class RelayScheduler extends DurableObject {
            SELECT MIN(expires_at) AS due_at
              FROM audio
             WHERE installation_id = ?1
+           UNION ALL
+           SELECT MIN(created_at + 30000) AS due_at
+             FROM approval_outbox
+            WHERE installation_id = ?1 AND status = 'pending'
          )
         WHERE due_at IS NOT NULL`,
     )

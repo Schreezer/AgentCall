@@ -30,6 +30,7 @@ test("sends the Worker-compatible APNs VoIP request and reuses its JWT", async (
     id: "123e4567-e89b-42d3-a456-426614174000",
     caller_name: "Hermes",
     message: "Wake up",
+    mode: "message",
     audio_id: "audio-id",
   };
 
@@ -49,6 +50,7 @@ test("sends the Worker-compatible APNs VoIP request and reuses its JWT", async (
     call_id: call.id,
     caller_name: "Hermes",
     message: "Wake up",
+    mode: "message",
     audio_id: "audio-id",
   });
   assert.equal(

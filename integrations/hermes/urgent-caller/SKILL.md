@@ -33,6 +33,25 @@ python3 scripts/call.py \
 
 Audio is limited to 5 MB by default and expires from the relay after one hour. For a later scheduled audio call, schedule the client itself to run near the due time instead of uploading the file far in advance.
 
+## Place a live Hermes conversation
+
+Use live mode when the call requires a discussion, decision, or access to the originating Hermes session:
+
+```bash
+python3 scripts/call.py \
+  --live \
+  --message "Hermes needs your decision; live voice was unavailable." \
+  --reason "The flight price changed and the hold expires soon." \
+  --relevant-context "The direct option is INR 4,000 more than the one-stop option." \
+  --desired-outcome "Ask which option Chirag wants Hermes to continue with." \
+  --urgency important \
+  --idempotency-key "flight-decision-2026-08-02"
+```
+
+Hermes supplies `HERMES_SESSION_ID` to the skill process; never invent, summarize, or expose it. The relay stores the full briefing but sends only the short `--message`, call ID, caller name, and mode through PushKit. After answer, Grok speaks the briefing and may independently call `ask_hermes` or `check_hermes_task`. Grok owns the wording; do not script a forced reply.
+
+The message remains a deliberately short fallback if live bootstrap or xAI audio fails. The four structured briefing fields are mandatory. Put only the minimum facts necessary for the opening conversation in them; Grok can ask Hermes for deeper context through the signed originating session.
+
 ## Judgment rules
 
 - Do not infer urgency merely because a task is overdue.
@@ -41,6 +60,7 @@ Audio is limited to 5 MB by default and expires from the relay after one hour. F
 - Ask permission before the first test call.
 - For an immediate call, poll `GET /v1/calls/:id` for up to 15 seconds until the status is `delivered` or `failed`; do not report only the initial `scheduled` response.
 - `delivered` means APNs accepted the VoIP push. Report the call ID, scheduled time, and terminal relay status, but do not claim the phone rang or the user answered.
+- A live voice model cannot approve Hermes actions. When Hermes pauses for approval, the user must choose in Caller's separately authenticated approval inbox.
 - If the call remains `scheduled`, say delivery is still pending. If it becomes `failed`, include the relay's delivery error and use the current chat channel for the urgent message.
 - If the relay fails, use the current chat channel and state that the call could not be scheduled.
 

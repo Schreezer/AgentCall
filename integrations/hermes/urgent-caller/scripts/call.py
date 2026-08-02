@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.request
 
-USER_AGENT = "AgentCall-Hermes/0.2"
+USER_AGENT = "AgentCall-Hermes/0.3"
 
 
 def main():
@@ -18,6 +18,11 @@ def main():
     parser.add_argument("--message", required=True)
     parser.add_argument("--at", dest="scheduled_at")
     parser.add_argument("--caller-name", default="Hermes")
+    parser.add_argument("--live", action="store_true", help="Start a live Grok voice conversation with Hermes MCP access")
+    parser.add_argument("--reason", help="Why Hermes is placing the live call now")
+    parser.add_argument("--relevant-context", help="Facts Grok needs to open the live conversation")
+    parser.add_argument("--desired-outcome", help="The decision or information Hermes needs from the call")
+    parser.add_argument("--urgency", choices=("normal", "important", "urgent"))
     parser.add_argument("--audio-file", help="Optional MP3, M4A, AAC, WAV, AIFF, or CAF speech file")
     parser.add_argument("--audio-content-type", help="Override the MIME type detected from --audio-file")
     parser.add_argument("--idempotency-key", required=True)
@@ -35,6 +40,26 @@ def main():
         return 2
 
     payload = {"caller_name": args.caller_name, "message": args.message}
+    if args.live:
+        context_values = {
+            "reason": args.reason,
+            "relevant_context": args.relevant_context,
+            "desired_outcome": args.desired_outcome,
+            "urgency": args.urgency,
+        }
+        missing = [name.replace("_", "-") for name, value in context_values.items() if not value]
+        if missing:
+            print("Live calls require: " + ", ".join(f"--{name}" for name in missing), file=sys.stderr)
+            return 2
+        session_id = os.environ.get("HERMES_SESSION_ID", "").strip()
+        if not session_id:
+            print("Live calls require HERMES_SESSION_ID from the active Hermes session.", file=sys.stderr)
+            return 2
+        payload.update({
+            "mode": "live_voice",
+            "call_context": context_values,
+            "origin_hermes_session_id": session_id,
+        })
     if args.scheduled_at:
         payload["scheduled_at"] = args.scheduled_at
 
@@ -104,6 +129,7 @@ def main():
             "delivered_at": result.get("delivered_at"),
             "delivery_errors": result.get("delivery_errors", []),
             "has_audio": result.get("has_audio", False),
+            "mode": result.get("mode", "message"),
         }
         print(json.dumps(output))
         return 1 if result.get("status") == "failed" else 0

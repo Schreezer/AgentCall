@@ -33,6 +33,7 @@ export class APNsClient {
       call_id: call.id,
       caller_name: call.caller_name,
       message: call.message,
+      mode: call.mode ?? "message",
       ...(call.audio_id ? { audio_id: call.audio_id } : {}),
     };
     const response = await this.fetcher(`${host}/3/device/${device.device_token}`, {
@@ -44,6 +45,41 @@ export class APNsClient {
         "apns-push-type": "voip",
         "apns-priority": "10",
         "apns-expiration": "0",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (response.status !== 200) {
+      const body = await response.text();
+      throw new Error(`APNs ${response.status}: ${body || "unknown error"}`);
+    }
+    return { status: response.status, apnsID: response.headers.get("apns-id") };
+  }
+
+  async sendBackground(device, event) {
+    if (!this.configured) throw new Error("APNs credentials are not configured");
+    if (!device.alert_device_token) throw new Error("Standard APNs token is not registered");
+    const host =
+      device.environment === "production"
+        ? "https://api.push.apple.com"
+        : "https://api.sandbox.push.apple.com";
+    const payload = {
+      aps: { "content-available": 1 },
+      event: "hermes_approval_required",
+      call_id: event.callID,
+      operation_id: event.operationID,
+      notification_id: event.notificationID,
+    };
+    const response = await this.fetcher(`${host}/3/device/${device.alert_device_token}`, {
+      method: "POST",
+      headers: {
+        authorization: `bearer ${await this.providerToken()}`,
+        "apns-id": event.notificationID,
+        "apns-topic": this.env.APNS_BUNDLE_ID,
+        "apns-push-type": "background",
+        "apns-priority": "5",
+        "apns-expiration": String(Math.floor(event.expiresAt / 1000)),
         "content-type": "application/json",
       },
       body: JSON.stringify(payload),

@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "agentcall-relay",
   "main": "src/index.js",
-  "compatibility_date": "2026-07-27",
+  "compatibility_date": "2026-07-29",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "observability": {
@@ -23,7 +23,11 @@
     "APNS_BUNDLE_ID": "com.chirag.agentcaller",
     "PAIRING_TTL_SECONDS": "900",
     "AUDIO_MAX_BYTES": "5000000",
-    "AUDIO_TTL_SECONDS": "3600"
+    "AUDIO_TTL_SECONDS": "3600",
+    "LIVE_VOICE_ENABLED": "true",
+    "XAI_VOICE_MODEL": "grok-voice-think-fast-2.0",
+    "XAI_VOICE": "eve",
+    "HERMES_VOICE_TOOLSETS": "web,session_search"
   },
   "secrets": {
     "required": ["APNS_TEAM_ID", "APNS_KEY_ID", "APNS_PRIVATE_KEY"]
@@ -39,11 +43,22 @@
       "binding": "AUDIO"
     }
   ],
+  "vpc_services": [
+    {
+      "binding": "HERMES_PRIVATE",
+      "service_id": "019fc37b-e782-7363-ab15-005725c05141",
+      "remote": true
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
         "name": "SCHEDULER",
         "class_name": "RelayScheduler"
+      },
+      {
+        "name": "HERMES_COORDINATOR",
+        "class_name": "HermesInstallationCoordinator"
       }
     ]
   },
@@ -51,6 +66,17 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["RelayScheduler"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["HermesInstallationCoordinator"]
+    }
+  ],
+  "workflows": [
+    {
+      "name": "caller-hermes-operation",
+      "binding": "HERMES_WORKFLOW",
+      "class_name": "HermesOperationWorkflow"
     }
   ]
 }
