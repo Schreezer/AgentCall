@@ -27,6 +27,9 @@ export function validateDevice(body) {
   if (body.alert_token != null && !/^[0-9a-f]{32,}$/i.test(body.alert_token)) {
     return "invalid_alert_device_token";
   }
+  if (body.device_identity != null && !/^[0-9a-f]{64}$/i.test(body.device_identity)) {
+    return "invalid_device_identity";
+  }
   if (body.platform !== "ios") return "unsupported_platform";
   if (!["sandbox", "production"].includes(body.environment)) return "invalid_environment";
   if (

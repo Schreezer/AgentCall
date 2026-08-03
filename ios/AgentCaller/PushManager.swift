@@ -8,12 +8,16 @@ final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
     let approvalStore = HermesApprovalStore()
 
     private let callCoordinator: CallCoordinator
+    private let urlSession: URLSession
     private var registry: PKPushRegistry?
     private var token: String?
     private var alertToken: String?
+    private var registrationTask: Task<Void, Never>?
+    private var registrationRequestedWhileRunning = false
 
-    init(callCoordinator: CallCoordinator) {
+    init(callCoordinator: CallCoordinator, urlSession: URLSession = .shared) {
         self.callCoordinator = callCoordinator
+        self.urlSession = urlSession
     }
 
     func start() {
@@ -36,33 +40,52 @@ final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
             configuration.markWaitingForPushToken()
             return
         }
+        if registrationTask != nil {
+            registrationRequestedWhileRunning = true
+            return
+        }
         configuration.markPushTokenAvailable()
         configuration.markConnecting()
 
         let body = DeviceRegistration(
             token: token,
             alertToken: alertToken,
+            deviceIdentity: configuration.deviceIdentity,
             platform: "ios",
             environment: isDebugBuild ? "sandbox" : "production",
             deviceName: UIDevice.current.name
         )
         var request: URLRequest
+        let isUpdatingExistingInstallation: Bool
         if let installationID = configuration.installationID,
            let installationSecret = configuration.installationSecret {
+            isUpdatingExistingInstallation = true
             request = URLRequest(url: relayURL.appending(path: "v1/installations/\(installationID)/device"))
             request.httpMethod = "PUT"
             request.setValue("Bearer \(installationSecret)", forHTTPHeaderField: "Authorization")
         } else {
+            isUpdatingExistingInstallation = false
             request = URLRequest(url: relayURL.appending(path: "v1/installations"))
             request.httpMethod = "POST"
         }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONEncoder().encode(body)
 
-        Task {
+        registrationTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.finishRegistrationAttempt() }
             do {
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                let (data, response) = try await self.urlSession.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    configuration.markFailed("Caller relay returned an invalid response")
+                    return
+                }
+                if http.statusCode == 401 && isUpdatingExistingInstallation {
+                    configuration.prepareForInstallationRecovery()
+                    self.registrationRequestedWhileRunning = true
+                    return
+                }
+                guard (200..<300).contains(http.statusCode) else {
                     configuration.markFailed("Caller relay rejected this iPhone")
                     return
                 }
@@ -73,6 +96,13 @@ final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
                 configuration.markFailed("Could not reach the Caller relay")
             }
         }
+    }
+
+    private func finishRegistrationAttempt() {
+        registrationTask = nil
+        guard registrationRequestedWhileRunning else { return }
+        registrationRequestedWhileRunning = false
+        registerCurrentTokenIfPossible()
     }
 
     func createPairingCode() {
@@ -86,7 +116,7 @@ final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
         request.setValue("Bearer \(installationSecret)", forHTTPHeaderField: "Authorization")
         Task {
             do {
-                let (data, response) = try await URLSession.shared.data(for: request)
+                let (data, response) = try await urlSession.data(for: request)
                 guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                     configuration.markFailed("Could not create a new pairing code")
                     return
@@ -116,7 +146,7 @@ final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
             request.httpMethod = "DELETE"
             request.setValue("Bearer \(installationSecret)", forHTTPHeaderField: "Authorization")
             do {
-                let (_, response) = try await URLSession.shared.data(for: request)
+                let (_, response) = try await urlSession.data(for: request)
                 guard let http = response as? HTTPURLResponse,
                       (200..<300).contains(http.statusCode) || http.statusCode == 401 else {
                     configuration.markFailed("Could not disconnect from the current relay")
@@ -142,7 +172,7 @@ final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
         request.setValue("Bearer \(installationSecret)", forHTTPHeaderField: "Authorization")
         Task {
             do {
-                let (data, response) = try await URLSession.shared.data(for: request)
+                let (data, response) = try await urlSession.data(for: request)
                 guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return }
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
@@ -180,7 +210,11 @@ final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
     }
 
     func pushRegistry(_ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType) {
-        token = pushCredentials.token.map { String(format: "%02x", $0) }.joined()
+        didReceiveVoIPToken(pushCredentials.token)
+    }
+
+    func didReceiveVoIPToken(_ data: Data) {
+        token = data.map { String(format: "%02x", $0) }.joined()
         configuration?.markPushTokenAvailable()
         registerCurrentTokenIfPossible()
     }
@@ -230,6 +264,7 @@ private final class PushCompletion: @unchecked Sendable {
 private struct DeviceRegistration: Encodable {
     let token: String
     let alertToken: String?
+    let deviceIdentity: String
     let platform: String
     let environment: String
     let deviceName: String
@@ -237,6 +272,7 @@ private struct DeviceRegistration: Encodable {
     enum CodingKeys: String, CodingKey {
         case token, platform, environment
         case alertToken = "alert_token"
+        case deviceIdentity = "device_identity"
         case deviceName = "device_name"
     }
 }

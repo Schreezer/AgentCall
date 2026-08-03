@@ -15,12 +15,22 @@ test("validates iOS device registration", () => {
       platform: "ios",
       environment: "sandbox",
       device_name: "Test iPhone",
+      device_identity: "cd".repeat(32),
     }),
     null,
   );
   assert.equal(
     validateDevice({ token: "bad", platform: "ios", environment: "sandbox" }),
     "invalid_device_token",
+  );
+  assert.equal(
+    validateDevice({
+      token: "ab".repeat(32),
+      platform: "ios",
+      environment: "sandbox",
+      device_identity: "too-short",
+    }),
+    "invalid_device_identity",
   );
 });
 

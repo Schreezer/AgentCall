@@ -8,6 +8,65 @@ private final class TestCredentialStore: CredentialStoring {
     func remove(_ key: String) -> Bool { values.removeValue(forKey: key) != nil }
 }
 
+private final class RegistrationRequestRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var methods: [String] = []
+    private var expectation: XCTestExpectation?
+
+    func reset(expectation: XCTestExpectation) {
+        lock.lock()
+        methods = []
+        self.expectation = expectation
+        lock.unlock()
+    }
+
+    func record(_ method: String) {
+        lock.lock()
+        methods.append(method)
+        let shouldFulfill = methods.count == 2
+        let expectation = self.expectation
+        lock.unlock()
+        if shouldFulfill { expectation?.fulfill() }
+    }
+
+    func snapshot() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return methods
+    }
+}
+
+private final class RegistrationURLProtocol: URLProtocol {
+    static let recorder = RegistrationRequestRecorder()
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let method = request.httpMethod ?? "GET"
+        Self.recorder.record(method)
+        var payload: [String: Any] = [
+            "installation_id": "installation-1",
+            "paired": true,
+            "pairing_code": NSNull(),
+            "pairing_expires_at": NSNull(),
+        ]
+        if method == "POST" { payload["installation_secret"] = "private-secret" }
+        let body = try! JSONSerialization.data(withJSONObject: payload)
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 @MainActor
 final class ConnectionConfigurationTests: XCTestCase {
     func testAcceptsHTTPSRelayURL() {
@@ -78,6 +137,45 @@ final class ConnectionConfigurationTests: XCTestCase {
         XCTAssertEqual(subject.pairingCode, "HERM-3S26")
     }
 
+    func testDeviceIdentityIsStableAndStoredOnlyInKeychain() {
+        let suite = UserDefaults(suiteName: UUID().uuidString)!
+        let credentials = TestCredentialStore()
+        let subject = ConnectionConfiguration(defaults: suite, credentials: credentials)
+
+        let first = subject.deviceIdentity
+        let second = subject.deviceIdentity
+
+        XCTAssertEqual(first, second)
+        XCTAssertNotNil(first.range(of: "^[0-9a-f]{64}$", options: .regularExpression))
+        XCTAssertEqual(credentials.values["device-identity"], first)
+        XCTAssertNil(suite.string(forKey: "device-identity"))
+    }
+
+    func testPushTokenCallbacksSerializeInitialRegistrationBeforeUpdatingDevice() async {
+        let suite = UserDefaults(suiteName: UUID().uuidString)!
+        let subject = ConnectionConfiguration(
+            defaults: suite,
+            credentials: TestCredentialStore(),
+            defaultRelayURL: "https://relay.test"
+        )
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [RegistrationURLProtocol.self]
+        let urlSession = URLSession(configuration: sessionConfiguration)
+        let manager = PushManager(callCoordinator: CallCoordinator(), urlSession: urlSession)
+        manager.configuration = subject
+        let completed = expectation(description: "serialized registration and update")
+        RegistrationURLProtocol.recorder.reset(expectation: completed)
+
+        manager.didReceiveVoIPToken(Data(repeating: 1, count: 32))
+        manager.didRegisterAlertToken(Data(repeating: 2, count: 32))
+
+        await fulfillment(of: [completed], timeout: 2)
+        XCTAssertEqual(RegistrationURLProtocol.recorder.snapshot(), ["POST", "PUT"])
+        XCTAssertEqual(subject.installationID, "installation-1")
+        XCTAssertEqual(subject.installationSecret, "private-secret")
+        XCTAssertTrue(subject.agentPaired)
+    }
+
     func testChangingRelayClearsInstallationAndPairingCredentials() {
         let suite = UserDefaults(suiteName: UUID().uuidString)!
         let credentials = TestCredentialStore()
@@ -102,7 +200,7 @@ final class ConnectionConfigurationTests: XCTestCase {
         XCTAssertEqual(subject.state, .waitingForPushToken)
     }
 
-    func testLegacyPlaceholderMigratesToManagedRelay() {
+    func testLegacyPlaceholderMigratesToManagedRelayWithoutDeletingConnection() {
         let suite = UserDefaults(suiteName: UUID().uuidString)!
         let credentials = TestCredentialStore()
         suite.set("https://push.caller.example", forKey: "agentCaller.relayURL")
@@ -114,11 +212,11 @@ final class ConnectionConfigurationTests: XCTestCase {
             defaultRelayURL: "https://managed.caller.example"
         )
         XCTAssertEqual(subject.relayURL, "https://managed.caller.example")
-        XCTAssertNil(subject.installationID)
-        XCTAssertNil(subject.installationSecret)
+        XCTAssertEqual(subject.installationID, "legacy-installation")
+        XCTAssertEqual(subject.installationSecret, "legacy-secret")
     }
 
-    func testLegacyMacRelayMigratesToManagedRelayAndClearsCredentials() {
+    func testLegacyMacRelayMigratesToManagedRelayWithoutDeletingConnection() {
         let suite = UserDefaults(suiteName: UUID().uuidString)!
         let credentials = TestCredentialStore()
         suite.set("https://macbook-pro-4.tail38a470.ts.net/", forKey: "agentCaller.relayURL")
@@ -130,8 +228,28 @@ final class ConnectionConfigurationTests: XCTestCase {
             defaultRelayURL: "https://managed.caller.example"
         )
         XCTAssertEqual(subject.relayURL, "https://managed.caller.example")
-        XCTAssertNil(subject.installationID)
-        XCTAssertNil(subject.installationSecret)
+        XCTAssertEqual(subject.installationID, "legacy-installation")
+        XCTAssertEqual(subject.installationSecret, "legacy-secret")
+    }
+
+    func testRestoresInstallationIdentityAndRelayFromKeychainAfterDefaultsReset() {
+        let suite = UserDefaults(suiteName: UUID().uuidString)!
+        let credentials = TestCredentialStore()
+        credentials.values["relay-url"] = "https://managed.caller.example"
+        credentials.values["installation-id"] = "installation-1"
+        credentials.values["installation-secret"] = "private-secret"
+
+        let subject = ConnectionConfiguration(
+            defaults: suite,
+            credentials: credentials,
+            defaultRelayURL: "https://other-default.example"
+        )
+
+        XCTAssertEqual(subject.relayURL, "https://managed.caller.example")
+        XCTAssertEqual(subject.installationID, "installation-1")
+        XCTAssertEqual(subject.installationSecret, "private-secret")
+        XCTAssertEqual(suite.string(forKey: "agentCaller.installationID"), "installation-1")
+        XCTAssertEqual(suite.string(forKey: "agentCaller.relayURL"), "https://managed.caller.example")
     }
 
     func testAgentInstructionsUseManagedRelayAndNeverRequestAppleCredentials() {

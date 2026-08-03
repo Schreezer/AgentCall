@@ -91,14 +91,35 @@ async function route(request, env, context) {
     const validationError = validateDevice(body);
     if (validationError) return json(400, { error: validationError });
     const now = Date.now();
+    const deviceIdentityHash = body.device_identity
+      ? await hashCredential(body.device_identity)
+      : null;
     await env.DB.prepare(
       `UPDATE installations
-          SET device_token = ?2, alert_device_token = ?3, environment = ?4, device_name = ?5, updated_at = ?6
+          SET device_token = ?2,
+              alert_device_token = ?3,
+              environment = ?4,
+              device_name = ?5,
+              updated_at = ?6,
+              device_identity_hash = COALESCE(?7, device_identity_hash)
         WHERE id = ?1`,
     )
-      .bind(installation.id, body.token, body.alert_token ?? installation.alert_device_token ?? null, body.environment, body.device_name ?? null, now)
+      .bind(
+        installation.id,
+        body.token,
+        body.alert_token ?? installation.alert_device_token ?? null,
+        body.environment,
+        body.device_name ?? null,
+        now,
+        deviceIdentityHash,
+      )
       .run();
-    return json(200, publicInstallation({ ...installation, ...body, updated_at: now }));
+    return json(200, publicInstallation({
+      ...installation,
+      ...body,
+      device_identity_hash: deviceIdentityHash ?? installation.device_identity_hash,
+      updated_at: now,
+    }));
   }
 
   const audioDownloadMatch = url.pathname.match(
@@ -232,32 +253,77 @@ async function route(request, env, context) {
 
 async function createInstallation(env, device) {
   const id = crypto.randomUUID();
-  const secret = randomToken();
+  const secret = device.device_identity ?? randomToken();
+  const deviceIdentityHash = device.device_identity
+    ? await hashCredential(device.device_identity)
+    : null;
   const now = Date.now();
   const row = {
     id,
     installation_secret_hash: await hashCredential(secret),
+    device_identity_hash: deviceIdentityHash,
     agent_token_hash: null,
     pairing_code: null,
     pairing_expires_at: null,
   };
-  await env.DB.prepare(
-    `INSERT INTO installations (
-       id, installation_secret_hash, device_token, alert_device_token, environment, device_name, created_at, updated_at
-     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)`,
+  if (deviceIdentityHash) {
+    const recovered = await recoverInstallation(env, device, deviceIdentityHash, now);
+    if (recovered) return json(200, publicInstallation(recovered, secret));
+  }
+  try {
+    await env.DB.prepare(
+      `INSERT INTO installations (
+         id, installation_secret_hash, device_identity_hash, device_token,
+         alert_device_token, environment, device_name, created_at, updated_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)`,
+    )
+      .bind(
+        id,
+        row.installation_secret_hash,
+        deviceIdentityHash,
+        device.token,
+        device.alert_token ?? null,
+        device.environment,
+        device.device_name ?? null,
+        now,
+      )
+      .run();
+  } catch (error) {
+    if (!deviceIdentityHash || !isUniqueConstraintError(error)) throw error;
+    const recovered = await recoverInstallation(env, device, deviceIdentityHash, Date.now());
+    if (!recovered) throw error;
+    return json(200, publicInstallation(recovered, secret));
+  }
+  const pairing = await assignPairingCode(env, id);
+  return json(201, publicInstallation({ ...row, ...pairing }, secret));
+}
+
+async function recoverInstallation(env, device, deviceIdentityHash, now) {
+  return env.DB.prepare(
+    `UPDATE installations
+        SET installation_secret_hash = ?2,
+            device_token = ?3,
+            alert_device_token = COALESCE(?4, alert_device_token),
+            environment = ?5,
+            device_name = ?6,
+            updated_at = ?7
+      WHERE device_identity_hash = ?1
+      RETURNING *`,
   )
     .bind(
-      id,
-      row.installation_secret_hash,
+      deviceIdentityHash,
+      deviceIdentityHash,
       device.token,
       device.alert_token ?? null,
       device.environment,
       device.device_name ?? null,
       now,
     )
-    .run();
-  const pairing = await assignPairingCode(env, id);
-  return json(201, publicInstallation({ ...row, ...pairing }, secret));
+    .first();
+}
+
+function isUniqueConstraintError(error) {
+  return String(error?.message ?? "").toUpperCase().includes("UNIQUE");
 }
 
 async function assignPairingCode(env, installationID) {

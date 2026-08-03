@@ -31,7 +31,10 @@ final class ConnectionConfiguration: ObservableObject {
     private let credentials: CredentialStoring
     private static let relayURLKey = "agentCaller.relayURL"
     private static let installationIDKey = "agentCaller.installationID"
+    private static let relayURLCredentialKey = "relay-url"
+    private static let installationIDCredentialKey = "installation-id"
     private static let installationSecretKey = "installation-secret"
+    private static let deviceIdentityKey = "device-identity"
     private static let legacyPlaceholderURL = "https://push.caller.example"
     private static let legacyMacRelayURL = "https://macbook-pro-4.tail38a470.ts.net"
     private static let fallbackRelayURL = "https://agentcall-relay.chiragmgg.workers.dev"
@@ -47,16 +50,22 @@ final class ConnectionConfiguration: ObservableObject {
         self.defaultRelayURL = bundledURL ?? Self.fallbackRelayURL
 
         let storedURL = defaults.string(forKey: Self.relayURLKey)
+            ?? credentials.string(for: Self.relayURLCredentialKey)
         if storedURL == nil
             || storedURL.map(Self.isLegacyRelayURL) == true {
             relayURL = self.defaultRelayURL
             defaults.set(self.defaultRelayURL, forKey: Self.relayURLKey)
-            if storedURL != nil {
-                defaults.removeObject(forKey: Self.installationIDKey)
-                _ = credentials.remove(Self.installationSecretKey)
-            }
+            _ = credentials.set(self.defaultRelayURL, for: Self.relayURLCredentialKey)
         } else {
             relayURL = storedURL ?? self.defaultRelayURL
+            defaults.set(relayURL, forKey: Self.relayURLKey)
+            _ = credentials.set(relayURL, for: Self.relayURLCredentialKey)
+        }
+
+        if let installationID = defaults.string(forKey: Self.installationIDKey) {
+            _ = credentials.set(installationID, for: Self.installationIDCredentialKey)
+        } else if let installationID = credentials.string(for: Self.installationIDCredentialKey) {
+            defaults.set(installationID, forKey: Self.installationIDKey)
         }
 
         let launchArguments = ProcessInfo.processInfo.arguments
@@ -83,8 +92,22 @@ final class ConnectionConfiguration: ObservableObject {
         validatedRelayURL(for: relayURL)
     }
 
-    var installationID: String? { defaults.string(forKey: Self.installationIDKey) }
+    var installationID: String? {
+        defaults.string(forKey: Self.installationIDKey)
+            ?? credentials.string(for: Self.installationIDCredentialKey)
+    }
     var installationSecret: String? { credentials.string(for: Self.installationSecretKey) }
+    var deviceIdentity: String {
+        if let identity = credentials.string(for: Self.deviceIdentityKey),
+           identity.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil {
+            return identity
+        }
+        let identity = [UUID(), UUID()]
+            .map { $0.uuidString.replacingOccurrences(of: "-", with: "").lowercased() }
+            .joined()
+        _ = credentials.set(identity, for: Self.deviceIdentityKey)
+        return identity
+    }
     var isReadyForAgentSetup: Bool { state == .connected && hasPushToken }
     var isUsingDefaultRelay: Bool { normalizedURLString(relayURL) == normalizedURLString(defaultRelayURL) }
 
@@ -125,6 +148,7 @@ final class ConnectionConfiguration: ObservableObject {
         let changed = updatedURL != normalizedURLString(relayURL)
         relayURL = updatedURL
         defaults.set(relayURL, forKey: Self.relayURLKey)
+        _ = credentials.set(relayURL, for: Self.relayURLCredentialKey)
 
         if changed {
             clearInstallationCredentials()
@@ -143,6 +167,7 @@ final class ConnectionConfiguration: ObservableObject {
 
     func applyRegistration(_ registration: InstallationRegistration) {
         defaults.set(registration.installationID, forKey: Self.installationIDKey)
+        _ = credentials.set(registration.installationID, for: Self.installationIDCredentialKey)
         if let secret = registration.installationSecret {
             _ = credentials.set(secret, for: Self.installationSecretKey)
         }
@@ -175,6 +200,14 @@ final class ConnectionConfiguration: ObservableObject {
     func markConnected() { state = .connected }
     func markFailed(_ message: String) { state = .failed(message) }
 
+    func prepareForInstallationRecovery() {
+        clearInstallationCredentials()
+        pairingCode = nil
+        pairingExpiresAt = nil
+        agentPaired = false
+        state = .connecting
+    }
+
     func hasUsablePairingCode(at date: Date = Date()) -> Bool {
         guard pairingCode != nil else { return false }
         guard let pairingExpiresAt else { return true }
@@ -192,6 +225,7 @@ final class ConnectionConfiguration: ObservableObject {
 
     private func clearInstallationCredentials() {
         defaults.removeObject(forKey: Self.installationIDKey)
+        _ = credentials.remove(Self.installationIDCredentialKey)
         _ = credentials.remove(Self.installationSecretKey)
     }
 

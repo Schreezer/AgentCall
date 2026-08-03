@@ -7,6 +7,65 @@ import { describe, expect, it } from "vitest";
 import { hashCredential } from "../src/core.js";
 
 describe("Cloudflare relay", () => {
+  it("recovers the same paired installation from a stable device identity", async () => {
+    const deviceIdentity = "91".repeat(32);
+    const device = {
+      token: "12".repeat(32),
+      alert_token: "34".repeat(32),
+      device_identity: deviceIdentity,
+      platform: "ios",
+      environment: "sandbox",
+      device_name: "Recovery test iPhone",
+    };
+    const registration = await requestJSON("/v1/installations", {
+      method: "POST",
+      body: { ...device, device_identity: undefined },
+    });
+    expect(registration.status).toBe(201);
+
+    const anchored = await requestJSON(
+      `/v1/installations/${registration.body.installation_id}/device`,
+      { method: "PUT", token: registration.body.installation_secret, body: device },
+    );
+    expect(anchored.status).toBe(200);
+
+    const pairing = await requestJSON("/v1/pairings/claim", {
+      method: "POST",
+      body: { pairing_code: registration.body.pairing_code },
+    });
+    expect(pairing.status).toBe(200);
+
+    const recovered = await requestJSON("/v1/installations", {
+      method: "POST",
+      body: { ...device, token: "56".repeat(32) },
+    });
+    expect(recovered.status).toBe(200);
+    expect(recovered.body).toMatchObject({
+      installation_id: registration.body.installation_id,
+      installation_secret: deviceIdentity,
+      paired: true,
+      pairing_code: null,
+    });
+
+    const oldCredential = await requestJSON(
+      `/v1/installations/${registration.body.installation_id}/device`,
+      { method: "PUT", token: registration.body.installation_secret, body: device },
+    );
+    expect(oldCredential.status).toBe(401);
+    const recoveredCredential = await requestJSON(
+      `/v1/installations/${registration.body.installation_id}/device`,
+      { method: "PUT", token: deviceIdentity, body: device },
+    );
+    expect(recoveredCredential.status).toBe(200);
+
+    const row = await env.DB.prepare(
+      "SELECT agent_token_hash, device_identity_hash, device_token FROM installations WHERE id = ?1",
+    ).bind(registration.body.installation_id).first();
+    expect(row.agent_token_hash).toBe(await hashCredential(pairing.body.agent_token));
+    expect(row.device_identity_hash).toBe(await hashCredential(deviceIdentity));
+    expect(row.device_token).toBe("12".repeat(32));
+  });
+
   it("runs registration, pairing, audio, idempotency, and alarm delivery", async () => {
     const health = await exports.default.fetch("https://relay.test/health");
     expect(health.status).toBe(200);
