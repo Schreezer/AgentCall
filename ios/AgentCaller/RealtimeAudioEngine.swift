@@ -12,6 +12,7 @@ final class RealtimeAudioEngine {
 
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
+    private let microphoneMuteState = MicrophoneMuteState()
 
     func start(onMicrophoneAudio: @escaping @Sendable (Data) -> Void) throws {
         let engine = AVAudioEngine()
@@ -25,10 +26,13 @@ final class RealtimeAudioEngine {
         input.isVoiceProcessingBypassed = false
         let inputFormat = input.outputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0 else { throw VoiceBootstrapError.invalidResponse }
-        input.installTap(onBus: 0, bufferSize: 2_048, format: inputFormat) { buffer, _ in
+        let microphoneMuteState = microphoneMuteState
+        let microphoneTap: @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void = { buffer, _ in
+            guard !microphoneMuteState.isMuted else { return }
             guard let data = Self.pcm16(buffer: buffer, inputFormat: inputFormat) else { return }
             onMicrophoneAudio(data)
         }
+        input.installTap(onBus: 0, bufferSize: 2_048, format: inputFormat, block: microphoneTap)
         engine.prepare()
         try engine.start()
         player.play()
@@ -59,6 +63,10 @@ final class RealtimeAudioEngine {
     func interruptPlayback() {
         player?.stop()
         player?.play()
+    }
+
+    func setMuted(_ muted: Bool) {
+        microphoneMuteState.isMuted = muted
     }
 
     func stop() {
@@ -98,6 +106,16 @@ final class RealtimeAudioEngine {
             samples[index] = Int16(value * Float(Int16.max - 1)).littleEndian
         }
         return samples.withUnsafeBytes { Data($0) }
+    }
+}
+
+private final class MicrophoneMuteState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isMuted: Bool {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
     }
 }
 

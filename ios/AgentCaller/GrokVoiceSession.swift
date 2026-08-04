@@ -58,6 +58,10 @@ final class GrokVoiceSession {
         bootstrapClient = nil
     }
 
+    func setMuted(_ muted: Bool) {
+        audio.setMuted(muted)
+    }
+
     private func connect(_ bootstrap: VoiceBootstrap) throws {
         var components = URLComponents(string: "wss://api.x.ai/v1/realtime")!
         components.queryItems = [URLQueryItem(name: "model", value: bootstrap.xai.model)]

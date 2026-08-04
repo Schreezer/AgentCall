@@ -15,6 +15,10 @@ This is the durable deployment target for AgentCall. In addition to the message/
 
 `APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_PRIVATE_KEY`, `XAI_API_KEY`, and `HERMES_API_KEY` must be Worker secrets. Permanent xAI and Hermes credentials must never be shipped in the iOS app. `APNS_BUNDLE_ID` is a non-secret variable in `wrangler.jsonc`.
 
+The Worker also serves the signed `urgent-caller` release. `bootstrap.py` is public but pinned by SHA-256 in the iOS setup prompt; manifests and release files require the installation-scoped agent token. Build artifacts are signed offline with the Ed25519 private key at `.secrets/caller-release-ed25519.pem` or `CALLER_RELEASE_SIGNING_KEY`. Only the public key and signed generated release are committed. Back up the private signing key securely before relying on managed production updates.
+
+For each release, update `integrations/hermes/urgent-caller/release.json` and bump its semantic version. Use `change_class: "compatible"` with `requires_user_approval: false` only for behavior-preserving instruction and client fixes. Any new capability, permission, data source, or tool scope must use a non-compatible change class and `requires_user_approval: true`. Then run `npm run build:skill-release`, review the signed manifest, run the tests/checks, and deploy the Worker. CI can validate the committed signature without access to the private key.
+
 ## Local verification
 
 ```bash

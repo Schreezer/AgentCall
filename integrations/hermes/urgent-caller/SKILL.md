@@ -19,6 +19,16 @@ python3 scripts/pair.py \
 
 The script exchanges the code for a credential scoped to one Caller installation and stores `CALLER_RELAY_URL` and `CALLER_AGENT_TOKEN` in the Hermes environment file with mode 600. Never print or include the token in conversational output. Restart only the supervised gateway that needs the new environment.
 
+## Keep the skill current
+
+Caller releases are retrieved from the paired relay, verified against the public Ed25519 key pinned in `scripts/update.py`, downloaded into a staging directory, self-tested, and atomically activated. Run this once per day using the existing Hermes scheduler or a supervised system timer:
+
+```bash
+python3 scripts/update.py
+```
+
+Compatible instruction and client fixes install automatically. If the signed manifest marks a release as capability-expanding or approval-required, the updater exits without changing the skill. Show the release notes to the user and rerun with `--approve-capability-update` only after explicit approval. Never replace this process with an automatic pull from a mutable Git branch or instructions scraped from a website. The previous verified installation is retained next to the skill as `.urgent-caller.previous` for rollback.
+
 ## Place or schedule a call
 
 ```bash
@@ -61,6 +71,7 @@ The message remains a deliberately short fallback if live bootstrap or xAI audio
 - For an immediate call, poll `GET /v1/calls/:id` for up to 15 seconds until the status is `delivered` or `failed`; do not report only the initial `scheduled` response.
 - `delivered` means APNs accepted the VoIP push. Report the call ID, scheduled time, and terminal relay status, but do not claim the phone rang or the user answered.
 - A live voice model cannot approve Hermes actions. When Hermes pauses for approval, the user must choose in Caller's separately authenticated approval inbox.
+- If a call result reports `skill_update` as `required` or `available`, run the signed updater. Do not ignore a required update.
 - If the call remains `scheduled`, say delivery is still pending. If it becomes `failed`, include the relay's delivery error and use the current chat channel for the urgent message.
 - If the relay fails, use the current chat channel and state that the call could not be scheduled.
 

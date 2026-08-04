@@ -25,10 +25,23 @@ export class HermesInstallationCoordinator extends DurableObject {
     await this.registerAllowedSession(input.originHermesSessionID, "origin");
     let hermesSessionID;
     let createSession = false;
-    if (input.sessionMode === "new") {
-      hermesSessionID = `caller_${crypto.randomUUID().replaceAll("-", "")}`;
-      createSession = true;
-      await this.registerAllowedSession(hermesSessionID, "created");
+    if (input.sessionMode === "independent") {
+      if (!input.contextKey) throw new Error("independent_context_required");
+      const contextStorageKey = `independent-context:${input.voiceSessionID}:${input.contextKey}`;
+      /** @type {{ sessionID?: string } | undefined} */
+      const existing = await this.ctx.storage.get(contextStorageKey);
+      if (existing?.sessionID) {
+        hermesSessionID = existing.sessionID;
+      } else {
+        hermesSessionID = `caller_${crypto.randomUUID().replaceAll("-", "")}`;
+        createSession = true;
+        await this.ctx.storage.put(contextStorageKey, {
+          sessionID: hermesSessionID,
+          contextKey: input.contextKey,
+          createdAt: Date.now(),
+        });
+        await this.registerAllowedSession(hermesSessionID, "independent");
+      }
     } else if (input.sessionMode === "continue") {
       hermesSessionID = input.sessionID;
       if (!(await this.ctx.storage.get(`allowed-session:${hermesSessionID}`))) {
@@ -52,6 +65,7 @@ export class HermesInstallationCoordinator extends DurableObject {
       requestHash: input.requestHash,
       request: input.request,
       sessionMode: input.sessionMode,
+      contextKey: input.contextKey ?? null,
       hermesSessionID,
       createSession,
       enabledToolsets: input.enabledToolsets,
@@ -192,8 +206,6 @@ export class HermesInstallationCoordinator extends DurableObject {
     return {
       status: operation.status,
       operation_id: operation.id,
-      hermes_session_id: operation.hermesSessionID ?? null,
-      task_id: operation.hermesRunID ?? null,
       ...(operation.result?.answer ? { answer: operation.result.answer } : {}),
       ...(operation.result?.summary ? { summary: operation.result.summary } : {}),
       ...(operation.result?.error ? { error: operation.result.error } : {}),

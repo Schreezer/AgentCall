@@ -10,7 +10,8 @@ import time
 import urllib.error
 import urllib.request
 
-USER_AGENT = "AgentCall-Hermes/0.3"
+SKILL_VERSION = "0.4.0"
+USER_AGENT = f"AgentCall-Hermes/{SKILL_VERSION}"
 
 
 def main():
@@ -89,6 +90,7 @@ def main():
                     "idempotency-key": audio_idempotency_key,
                     "x-audio-filename": safe_filename,
                     "user-agent": USER_AGENT,
+                    "x-caller-skill-version": SKILL_VERSION,
                 },
             )
             with urllib.request.urlopen(upload_request, timeout=30) as response:
@@ -104,10 +106,13 @@ def main():
                 "content-type": "application/json",
                 "idempotency-key": args.idempotency_key,
                 "user-agent": USER_AGENT,
+                "x-caller-skill-version": SKILL_VERSION,
             },
         )
         with urllib.request.urlopen(request, timeout=15) as response:
             result = json.loads(response.read().decode())
+            update_status = response.headers.get("x-caller-skill-update", "unknown")
+            latest_version = response.headers.get("x-caller-skill-latest", SKILL_VERSION)
 
         wait_seconds = args.wait_seconds
         if wait_seconds is None:
@@ -117,7 +122,11 @@ def main():
             time.sleep(min(1, max(deadline - time.monotonic(), 0)))
             status_request = urllib.request.Request(
                 f"{relay_url}/v1/calls/{result['id']}",
-                headers={"authorization": f"Bearer {agent_token}", "user-agent": USER_AGENT},
+                headers={
+                    "authorization": f"Bearer {agent_token}",
+                    "user-agent": USER_AGENT,
+                    "x-caller-skill-version": SKILL_VERSION,
+                },
             )
             with urllib.request.urlopen(status_request, timeout=15) as response:
                 result = json.loads(response.read().decode())
@@ -130,6 +139,8 @@ def main():
             "delivery_errors": result.get("delivery_errors", []),
             "has_audio": result.get("has_audio", False),
             "mode": result.get("mode", "message"),
+            "skill_update": update_status,
+            "latest_skill_version": latest_version,
         }
         print(json.dumps(output))
         return 1 if result.get("status") == "failed" else 0

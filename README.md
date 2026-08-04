@@ -38,7 +38,7 @@ For the complete trust model and request lifecycle, see [ARCHITECTURE.md](ARCHIT
 | `ios/AgentCaller` | Native SwiftUI app, pairing UI, PushKit registration, CallKit handling, and audio playback |
 | `backend` | Local Node.js relay for development and compatibility testing |
 | `cloudflare` | Durable Cloudflare Worker relay using D1, R2, and a Durable Object scheduler |
-| `integrations/hermes/urgent-caller` | Reference Hermes skill with dependency-free Python pairing and call clients |
+| `integrations/hermes/urgent-caller` | Signed, versioned Hermes skill with pairing, call, live-Grok briefing, and managed-update clients |
 | `HERMES_CALLER_SETUP_PROMPT.md` | Self-contained instructions that the iOS app can give to a user's agent |
 | `MAC_TEST_DEPLOYMENT.md` | Temporary Mac-hosted relay and physical-device testing notes |
 
@@ -168,6 +168,8 @@ The checked-in managed relay is `https://agentcall-relay.chiragmgg.workers.dev`.
 
 Once the app is ready, it produces a short-lived pairing code and a **Copy agent instructions** action. Give the copied instructions to Hermes, OpenClaw, or another capable agent. The agent claims the one-time code and receives an installation-scoped credential.
 
+The copied instructions bootstrap a versioned `urgent-caller` package from the paired relay. The app pins the bootstrap SHA-256; the bootstrap and installed updater pin an Ed25519 public key and verify the signed manifest plus every file digest before an atomic install. Compatible releases may update automatically once per day. Releases marked as expanding capabilities, permissions, or tool scope require explicit user approval. Do not configure agents to execute instructions from a mutable Git branch or arbitrary website.
+
 To pair the included Hermes integration manually:
 
 ```bash
@@ -201,6 +203,23 @@ python3 scripts/call.py \
 
 Use a stable, event-specific idempotency key. Retrying the same event with the same key will not create duplicate calls.
 
+### Place a live Grok call
+
+Use live mode when Hermes needs a discussion or decision tied to the active session:
+
+```bash
+python3 scripts/call.py \
+  --live \
+  --message "Hermes needs your decision; live voice was unavailable." \
+  --reason "The flight hold expires soon." \
+  --relevant-context "The direct option is INR 4,000 more." \
+  --desired-outcome "Ask which option to book." \
+  --urgency important \
+  --idempotency-key "flight-decision-2026-08-03"
+```
+
+Hermes supplies `HERMES_SESSION_ID`. The relay gives Grok the structured briefing and fresh governing instructions when the call is answered; Grok can consult the signed originating Hermes session through `ask_hermes` rather than receiving a large or guessed context dump.
+
 ### Place a call with an audio file
 
 The agent can upload MP3, M4A, AAC, WAV, AIFF, or CAF audio and have it played after the user answers:
@@ -222,6 +241,9 @@ Audio is limited to 5 MB by default and expires after one hour. For a future cal
 | `GET` | `/health` | Relay and APNs readiness |
 | `POST` | `/v1/installations` | Register an iOS installation |
 | `POST` | `/v1/pairings/claim` | Exchange a one-time code for an agent token |
+| `GET` | `/v1/agent-package/urgent-caller/bootstrap.py` | Fetch the app-hash-pinned installer |
+| `GET` | `/v1/agent-package/urgent-caller/manifest` | Fetch the authenticated signed skill manifest |
+| `GET` | `/v1/agent-package/urgent-caller/files/:version/:path` | Fetch a manifest-hashed release file |
 | `POST` | `/v1/audio` | Upload a short-lived audio attachment |
 | `POST` | `/v1/calls` | Place or schedule a call |
 | `GET` | `/v1/calls/:id` | Read relay delivery status |

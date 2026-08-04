@@ -20,8 +20,18 @@ import { RelayScheduler } from "./scheduler.js";
 import { HermesInstallationCoordinator } from "./hermes-installation-coordinator.js";
 import { HermesOperationWorkflow } from "./hermes-operation-workflow.js";
 import { handleMcp } from "./mcp.js";
-import { createVoiceBootstrap, revokeVoiceSession } from "./voice-bootstrap.js";
+import {
+  createVoiceBootstrap,
+  diagnoseVoiceProvider,
+  revokeVoiceSession,
+} from "./voice-bootstrap.js";
 import { HermesClient } from "./hermes-client.js";
+import {
+  skillBootstrapResponse,
+  skillFileResponse,
+  skillManifestResponse,
+  withSkillReleaseHeaders,
+} from "./skill-release.js";
 
 export { RelayScheduler, HermesInstallationCoordinator, HermesOperationWorkflow };
 
@@ -33,8 +43,9 @@ const DEFAULT_PAIRING_TTL_SECONDS = 900;
 /** @type {ExportedHandler<Env>} */
 const worker = {
   async fetch(request, env, context) {
+    let response;
     try {
-      return await route(request, env, context);
+      response = await route(request, env, context);
     } catch (error) {
       console.error(
         JSON.stringify({
@@ -45,8 +56,9 @@ const worker = {
         }),
       );
       const status = errorStatus(error);
-      return json(status, { error: status === 500 ? "internal_error" : error.message });
+      response = json(status, { error: status === 500 ? "internal_error" : error.message });
     }
+    return withSkillReleaseHeaders(response, request);
   },
   async scheduled(_controller, env, context) {
     context.waitUntil(runMaintenance(env));
@@ -225,8 +237,28 @@ async function route(request, env, context) {
       : json(404, { error: "invalid_or_expired_pairing_code" });
   }
 
+  if (request.method === "GET" && url.pathname === "/v1/agent-package/urgent-caller/bootstrap.py") {
+    return skillBootstrapResponse();
+  }
+
   const installation = await authorizeAgent(env, bearerToken(request));
   if (!installation) return json(401, { error: "invalid_agent_credential" });
+
+  if (request.method === "GET" && url.pathname === "/v1/agent-package/urgent-caller/manifest") {
+    return skillManifestResponse(request);
+  }
+
+  if (request.method === "POST" && url.pathname === "/v1/agent-diagnostics/live-voice") {
+    if (!(await allowRate(env, `voice-diagnostic:${installation.id}`, 3))) return rateLimited();
+    return diagnoseVoiceProvider(env);
+  }
+
+  const skillFileMatch = url.pathname.match(
+    /^\/v1\/agent-package\/urgent-caller\/files\/(\d+\.\d+\.\d+)\/(.+)$/,
+  );
+  if (request.method === "GET" && skillFileMatch) {
+    return skillFileResponse(skillFileMatch[1], skillFileMatch[2]);
+  }
 
   if (request.method === "POST" && url.pathname === "/v1/audio") {
     if (!(await allowRate(env, `audio:${installation.id}`, 10))) return rateLimited();

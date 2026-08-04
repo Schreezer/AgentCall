@@ -10,6 +10,7 @@ cloudflare/.dev.vars
 cloudflare/.wrangler/
 cloudflare/dist/
 cloudflare/node_modules/
+.secrets/
 *.p8
 *.mobileprovision
 

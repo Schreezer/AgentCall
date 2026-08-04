@@ -24,22 +24,28 @@ function createHermesMcpServer(env, scope, requestID) {
     {
       title: "Ask Hermes",
       description:
-        "Consult the user's Hermes agent in the exact signed session lineage. " +
-        "Use new for independent work, active for the call's origin session, or continue only with a session ID previously returned by this tool. " +
+        "Consult Hermes using an explicit context boundary. Use origin only for work directly related to " +
+        "the reason for this call; use independent for a different topic or task. Reuse the same " +
+        "independent_context key for follow-ups to one independent task, and use a new key for another task. " +
+        "Never ask the user to choose among Hermes sessions or mention internal sessions. " +
         "The result may be working; never invent completion and use check_hermes_task with its operation_id.",
       inputSchema: {
         request: z.string().trim().min(1).max(8_000).describe("A complete standalone request for Hermes."),
-        session_mode: z.enum(["active", "new", "continue"]),
-        session_id: z.string().trim().min(1).max(240).optional(),
+        context_scope: z.enum(["origin", "independent"]).describe(
+          "origin when the request depends on the call's briefing or originating work; independent for an unrelated topic or task.",
+        ),
+        independent_context: z.string().trim().regex(/^[a-z0-9][a-z0-9_-]{0,79}$/).optional().describe(
+          "Required with independent. A stable topic key reused only for follow-ups to that same independent task, for example weather_trip or app_bug.",
+        ),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
     async (args) => {
-      if (args.session_mode === "continue" && !args.session_id) {
-        return toolError("session_id is required when session_mode is continue");
+      if (args.context_scope === "independent" && !args.independent_context) {
+        return toolError("independent_context_required");
       }
-      if (args.session_mode !== "continue" && args.session_id) {
-        return toolError("session_id is accepted only when session_mode is continue");
+      if (args.context_scope === "origin" && args.independent_context) {
+        return toolError("independent_context_not_allowed_for_origin");
       }
       const replayKey = await hashCredential(`${scope.id}:ask_hermes:${requestID}`);
       const requestHash = await hashCredential(stableStringify(args));
@@ -52,8 +58,9 @@ function createHermesMcpServer(env, scope, requestID) {
           replayKey,
           requestHash,
           request: args.request,
-          sessionMode: args.session_mode,
-          sessionID: args.session_id ?? null,
+          sessionMode: args.context_scope === "independent" ? "independent" : "active",
+          sessionID: null,
+          contextKey: args.independent_context ?? null,
           originHermesSessionID: scope.origin_hermes_session_id,
           activeHermesSessionID: scope.origin_hermes_session_id,
           enabledToolsets: configuredVoiceToolsets(env),

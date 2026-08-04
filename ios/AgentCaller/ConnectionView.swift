@@ -4,43 +4,52 @@ import UIKit
 
 struct ConnectionView: View {
     let pushManager: PushManager
-    let callCoordinator: CallCoordinator
+    @ObservedObject var callCoordinator: CallCoordinator
     @ObservedObject var approvalStore: HermesApprovalStore
 
     @EnvironmentObject private var configuration: ConnectionConfiguration
     @Environment(\.colorScheme) private var colorScheme
     @State private var didCopyInstructions = false
+    @State private var didCopyUpdateInstructions = false
     @State private var isShowingSettings = false
     @State private var now = Date()
 
     private let pairingPoller = Timer.publish(every: 4, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                background
+        ZStack {
+            NavigationStack {
+                ZStack {
+                    background
 
-                ScrollView {
-                    VStack(spacing: 18) {
-                        if !approvalStore.approvals.isEmpty {
-                            approvalInbox
+                    ScrollView {
+                        VStack(spacing: 18) {
+                            if !approvalStore.approvals.isEmpty {
+                                approvalInbox
+                            }
+                            homeContent
                         }
-                        homeContent
+                            .frame(maxWidth: 520)
+                            .padding(.horizontal, 20)
+                            .padding(.top, 18)
+                            .padding(.bottom, 36)
+                            .frame(maxWidth: .infinity)
                     }
-                        .frame(maxWidth: 520)
-                        .padding(.horizontal, 20)
-                        .padding(.top, 18)
-                        .padding(.bottom, 36)
-                        .frame(maxWidth: .infinity)
+                }
+                .navigationTitle("Caller")
+                .navigationBarTitleDisplayMode(.large)
+                .toolbarBackground(.hidden, for: .navigationBar)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        settingsButton
+                    }
                 }
             }
-            .navigationTitle("Caller")
-            .navigationBarTitleDisplayMode(.large)
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    settingsButton
-                }
+
+            if let call = callCoordinator.activeCall {
+                ActiveCallView(call: call, coordinator: callCoordinator)
+                    .transition(.opacity.combined(with: .scale(scale: 1.02)))
+                    .zIndex(10)
             }
         }
         .tint(.blue)
@@ -57,7 +66,11 @@ struct ConnectionView: View {
                 pushManager.refreshPairingStatus()
             }
         }
+        .onChange(of: callCoordinator.activeCall) { _, activeCall in
+            if activeCall != nil { isShowingSettings = false }
+        }
         .animation(.snappy(duration: 0.45), value: configuration.homeState(at: now))
+        .animation(.easeInOut(duration: 0.25), value: callCoordinator.activeCall)
     }
 
     private var approvalInbox: some View {
@@ -224,7 +237,9 @@ struct ConnectionView: View {
                 .background(Color.green.opacity(0.11), in: Capsule())
                 .accessibilityIdentifier("connection-status")
 
-            Text("Agent and connection controls are available in Settings.")
+            copyUpdateInstructionsButton
+
+            Text("Paste these instructions into your connected agent. Your existing pairing stays unchanged.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -380,6 +395,39 @@ struct ConnectionView: View {
     }
 
     @ViewBuilder
+    private var copyUpdateInstructionsButton: some View {
+        let button = Button {
+            UIPasteboard.general.string = AgentSetupInstructions.updateText(
+                relayURL: configuration.relayURL
+            )
+            didCopyUpdateInstructions = true
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                didCopyUpdateInstructions = false
+            }
+        } label: {
+            Label(
+                didCopyUpdateInstructions ? "Update instructions copied" : "Update connected agent",
+                systemImage: didCopyUpdateInstructions ? "checkmark" : "arrow.down.circle"
+            )
+            .font(.headline)
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: 52)
+        }
+        .accessibilityIdentifier("copy-agent-update-instructions-button")
+
+        if #available(iOS 26.0, *) {
+            button
+                .buttonStyle(.glassProminent)
+                .buttonBorderShape(.roundedRectangle(radius: 17))
+        } else {
+            button
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.roundedRectangle(radius: 17))
+        }
+    }
+
+    @ViewBuilder
     private func prominentButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
         let button = Button(action: action) {
             Label(title, systemImage: systemImage)
@@ -397,6 +445,144 @@ struct ConnectionView: View {
                 .buttonStyle(.borderedProminent)
                 .buttonBorderShape(.roundedRectangle(radius: 17))
         }
+    }
+}
+
+private struct ActiveCallView: View {
+    let call: ActiveCallPresentation
+    @ObservedObject var coordinator: CallCoordinator
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(red: 0.06, green: 0.09, blue: 0.14), Color.black],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                Spacer(minLength: 52)
+
+                Image(systemName: "waveform.circle.fill")
+                    .font(.system(size: 92, weight: .regular))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, Color.blue)
+                    .accessibilityHidden(true)
+
+                Text(call.callerName)
+                    .font(.system(size: 34, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.top, 24)
+
+                Text(call.isLiveVoice ? "Live voice" : "Voice message")
+                    .font(.headline)
+                    .foregroundStyle(.white.opacity(0.68))
+                    .padding(.top, 7)
+
+                TimelineView(.periodic(from: call.connectedAt, by: 1)) { context in
+                    Text(callDuration(at: context.date))
+                        .font(.system(.body, design: .monospaced).weight(.medium))
+                        .foregroundStyle(.white.opacity(0.8))
+                        .contentTransition(.numericText())
+                }
+                .padding(.top, 9)
+
+                Text("Audio: \(coordinator.audioRouteName)")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .padding(.top, 12)
+
+                Spacer()
+
+                HStack(spacing: 22) {
+                    callButton(
+                        title: "Mute",
+                        systemImage: coordinator.isMuted ? "mic.slash.fill" : "mic.fill",
+                        selected: coordinator.isMuted,
+                        action: coordinator.toggleMute
+                    )
+
+                    callButton(
+                        title: "Speaker",
+                        systemImage: "speaker.wave.3.fill",
+                        selected: coordinator.isSpeakerEnabled,
+                        action: coordinator.toggleSpeaker
+                    )
+
+                    audioRouteMenu
+                }
+
+                Button(action: coordinator.endActiveCall) {
+                    VStack(spacing: 10) {
+                        Image(systemName: "phone.down.fill")
+                            .font(.system(size: 28, weight: .semibold))
+                            .frame(width: 72, height: 72)
+                            .background(Color.red, in: Circle())
+                        Text("End")
+                            .font(.footnote.weight(.medium))
+                    }
+                    .foregroundStyle(.white)
+                }
+                .accessibilityLabel("End call")
+                .padding(.top, 44)
+                .padding(.bottom, 42)
+            }
+            .padding(.horizontal, 24)
+        }
+        .accessibilityIdentifier("active-call-screen")
+    }
+
+    private var audioRouteMenu: some View {
+        Menu {
+            ForEach(coordinator.availableAudioRoutes) { route in
+                Button {
+                    coordinator.selectAudioRoute(route)
+                } label: {
+                    Label(route.name, systemImage: route.systemImage)
+                }
+            }
+        } label: {
+            CallControlLabel(title: "Audio", systemImage: "airplayaudio", selected: false)
+        }
+        .accessibilityLabel("Choose audio route")
+    }
+
+    private func callButton(
+        title: String,
+        systemImage: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            CallControlLabel(title: title, systemImage: systemImage, selected: selected)
+        }
+        .accessibilityValue(selected ? "On" : "Off")
+    }
+
+    private func callDuration(at date: Date) -> String {
+        let elapsed = max(0, Int(date.timeIntervalSince(call.connectedAt)))
+        return String(format: "%02d:%02d", elapsed / 60, elapsed % 60)
+    }
+}
+
+private struct CallControlLabel: View {
+    let title: String
+    let systemImage: String
+    let selected: Bool
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 24, weight: .semibold))
+                .frame(width: 68, height: 68)
+                .foregroundStyle(selected ? .black : .white)
+                .background(selected ? Color.white : Color.white.opacity(0.16), in: Circle())
+            Text(title)
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.white)
+        }
+        .frame(minWidth: 80)
     }
 }
 

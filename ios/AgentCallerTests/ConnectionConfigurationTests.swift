@@ -1277,6 +1277,10 @@ final class ConnectionConfigurationTests: XCTestCase {
         )
         XCTAssertTrue(instructions.contains("CALLER_PAIRING_CODE=HERM-3S26"))
         XCTAssertTrue(instructions.contains("/v1/pairings/claim"))
+        XCTAssertTrue(instructions.contains("/v1/agent-package/urgent-caller/bootstrap.py"))
+        XCTAssertTrue(instructions.contains(AgentSetupInstructions.bootstrapSHA256))
+        XCTAssertTrue(instructions.contains("--approve-capability-update"))
+        XCTAssertTrue(instructions.contains("--relevant-context"))
         XCTAssertTrue(instructions.contains("CALLER_AGENT_TOKEN"))
         XCTAssertTrue(instructions.contains("Idempotency-Key"))
         XCTAssertTrue(instructions.contains("Never ask me for those"))
@@ -1284,6 +1288,30 @@ final class ConnectionConfigurationTests: XCTestCase {
         XCTAssertFalse(instructions.contains("APNS_KEY_ID="))
         XCTAssertFalse(instructions.contains("APNS_PRIVATE_KEY_PATH="))
         XCTAssertFalse(instructions.contains("/Users/"))
+    }
+
+    func testConnectedAgentUpdateInstructionsPreservePairingAndExplainNewCapabilities() {
+        let instructions = AgentSetupInstructions.updateText(
+            relayURL: "https://push.caller.example"
+        )
+
+        XCTAssertTrue(instructions.contains("already paired"))
+        XCTAssertTrue(instructions.contains("Do not pair again"))
+        XCTAssertTrue(instructions.contains("https://push.caller.example/v1/agent-package/urgent-caller/bootstrap.py"))
+        XCTAssertTrue(instructions.contains(AgentSetupInstructions.bootstrapSHA256))
+        XCTAssertTrue(instructions.contains("CALLER_AGENT_TOKEN"))
+        XCTAssertTrue(instructions.contains("--check-only"))
+        XCTAssertTrue(instructions.contains("--approve-capability-update"))
+        XCTAssertTrue(instructions.contains("--relevant-context"))
+        XCTAssertTrue(instructions.contains("ask_hermes"))
+        XCTAssertTrue(instructions.contains("check_hermes_task"))
+        XCTAssertTrue(instructions.contains("once per day"))
+        XCTAssertTrue(instructions.contains("do not place a test call"))
+        XCTAssertFalse(instructions.contains("/v1/pairings/claim"))
+        XCTAssertFalse(instructions.contains("CALLER_PAIRING_CODE"))
+        XCTAssertFalse(instructions.contains("APNS_TEAM_ID="))
+        XCTAssertFalse(instructions.contains("APNS_KEY_ID="))
+        XCTAssertFalse(instructions.contains("APNS_PRIVATE_KEY_PATH="))
     }
 
     func testHomeStateShowsOnlyTheNextRelevantStep() {

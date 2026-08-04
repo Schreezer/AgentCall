@@ -1,12 +1,24 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import { HermesClient } from "./hermes-client.js";
 
-const MAX_POLLS = 360;
+const MAX_POLLS = 45;
 
 export class HermesOperationWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
     const { operationID, installationID } = event.payload;
     const coordinator = this.env.HERMES_COORDINATOR.getByName(installationID);
+    try {
+      return await this.runOperation(operationID, installationID, coordinator, step);
+    } catch (error) {
+      await coordinator.updateOperation(operationID, {
+        status: "failed",
+        result: { error: workflowErrorCode(error) },
+      }).catch(() => {});
+      throw error;
+    }
+  }
+
+  async runOperation(operationID, installationID, coordinator, step) {
     const hermes = new HermesClient(this.env);
     let operation = await coordinator.getOperation(operationID);
     if (!operation) throw new Error("hermes_operation_not_found");
@@ -69,7 +81,7 @@ export class HermesOperationWorkflow extends WorkflowEntrypoint {
         });
         return { status: mapped, operationID, runID };
       }
-      await step.sleep(`wait before Hermes poll ${poll}`, "5 seconds");
+      await step.sleep(`wait before Hermes poll ${poll}`, hermesPollDelay(poll));
     }
 
     await coordinator.updateOperation(operationID, {
@@ -78,4 +90,16 @@ export class HermesOperationWorkflow extends WorkflowEntrypoint {
     });
     return { status: "working", operationID, runID };
   }
+}
+
+export function hermesPollDelay(poll) {
+  if (poll < 10) return "5 seconds";
+  if (poll < 20) return "15 seconds";
+  return "1 minute";
+}
+
+function workflowErrorCode(error) {
+  const message = String(error?.message ?? error).toLowerCase();
+  if (message.includes("too many subrequests")) return "hermes_workflow_subrequest_limit";
+  return "hermes_workflow_failed";
 }

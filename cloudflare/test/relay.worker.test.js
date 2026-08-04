@@ -5,8 +5,15 @@ import {
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { hashCredential } from "../src/core.js";
+import { hermesPollDelay } from "../src/hermes-operation-workflow.js";
 
 describe("Cloudflare relay", () => {
+  it("backs off Hermes polling before the Worker subrequest ceiling", () => {
+    expect(hermesPollDelay(0)).toBe("5 seconds");
+    expect(hermesPollDelay(10)).toBe("15 seconds");
+    expect(hermesPollDelay(20)).toBe("1 minute");
+  });
+
   it("recovers the same paired installation from a stable device identity", async () => {
     const deviceIdentity = "91".repeat(32);
     const device = {
@@ -34,6 +41,29 @@ describe("Cloudflare relay", () => {
       body: { pairing_code: registration.body.pairing_code },
     });
     expect(pairing.status).toBe(200);
+
+    const unauthorizedManifest = await requestJSON("/v1/agent-package/urgent-caller/manifest");
+    expect(unauthorizedManifest.status).toBe(401);
+    const manifest = await requestJSON("/v1/agent-package/urgent-caller/manifest", {
+      token: pairing.body.agent_token,
+    });
+    expect(manifest.status).toBe(200);
+    expect(manifest.body.manifest).toMatchObject({
+      skill_name: "urgent-caller",
+      skill_version: "0.4.0",
+      requires_user_approval: false,
+    });
+    const bootstrap = await exports.default.fetch(
+      "https://relay.test/v1/agent-package/urgent-caller/bootstrap.py",
+    );
+    expect(bootstrap.status).toBe(200);
+    expect(await bootstrap.text()).toContain("Bootstrap the signed urgent-caller skill");
+    const skillFile = await exports.default.fetch(
+      "https://relay.test/v1/agent-package/urgent-caller/files/0.4.0/SKILL.md",
+      { headers: { authorization: `Bearer ${pairing.body.agent_token}` } },
+    );
+    expect(skillFile.status).toBe(200);
+    expect(await skillFile.text()).toContain("# Urgent Caller");
 
     const recovered = await requestJSON("/v1/installations", {
       method: "POST",
@@ -253,16 +283,90 @@ describe("Cloudflare relay", () => {
       "ask_hermes",
       "check_hermes_task",
     ]);
+    const askHermes = listed.body.result.tools.find((tool) => tool.name === "ask_hermes");
+    expect(askHermes.description).toContain("explicit context boundary");
+    expect(askHermes.inputSchema.required).toEqual(["request", "context_scope"]);
+    expect(Object.keys(askHermes.inputSchema.properties)).toEqual([
+      "request",
+      "context_scope",
+      "independent_context",
+    ]);
+
+    const origin = await mcpRequest({
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "ask_hermes",
+        arguments: { request: "Summarize the call decision", context_scope: "origin" },
+      },
+    }, token);
+    expect(origin.body.result.structuredContent).toMatchObject({ status: "queued" });
+    expect(origin.body.result.structuredContent).not.toHaveProperty("hermes_session_id");
+
+    const independentFirst = await mcpRequest({
+      id: 5,
+      method: "tools/call",
+      params: {
+        name: "ask_hermes",
+        arguments: {
+          request: "Check tomorrow's weather",
+          context_scope: "independent",
+          independent_context: "weather_trip",
+        },
+      },
+    }, token);
+    const independentFollowUp = await mcpRequest({
+      id: 6,
+      method: "tools/call",
+      params: {
+        name: "ask_hermes",
+        arguments: {
+          request: "Also check the evening forecast",
+          context_scope: "independent",
+          independent_context: "weather_trip",
+        },
+      },
+    }, token);
+    const separateTask = await mcpRequest({
+      id: 7,
+      method: "tools/call",
+      params: {
+        name: "ask_hermes",
+        arguments: {
+          request: "Inspect the app crash",
+          context_scope: "independent",
+          independent_context: "app_crash",
+        },
+      },
+    }, token);
+    const operationIDs = [independentFirst, independentFollowUp, separateTask]
+      .map((response) => response.body.result.structuredContent.operation_id);
+    const independentRows = await env.DB.prepare(
+      `SELECT id, hermes_session_id FROM hermes_operations
+       WHERE id IN (?1, ?2, ?3) ORDER BY created_at`,
+    ).bind(...operationIDs).all();
+    expect(independentRows.results[0].hermes_session_id).toBe(independentRows.results[1].hermes_session_id);
+    expect(independentRows.results[2].hermes_session_id).not.toBe(independentRows.results[0].hermes_session_id);
+
+    const missingContext = await mcpRequest({
+      id: 8,
+      method: "tools/call",
+      params: {
+        name: "ask_hermes",
+        arguments: { request: "Do separate work", context_scope: "independent" },
+      },
+    }, token);
+    expect(missingContext.body.result.isError).toBe(true);
+    expect(missingContext.body.result.content[0].text).toContain("independent_context_required");
 
     const checked = await mcpRequest({
-      id: 4,
+      id: 9,
       method: "tools/call",
       params: { name: "check_hermes_task", arguments: { operation_id: operationID } },
     }, token);
     expect(checked.body.result.structuredContent).toMatchObject({
       status: "answered",
       answer: "Verified answer",
-      hermes_session_id: "origin-session",
     });
   });
 
@@ -279,6 +383,23 @@ describe("Cloudflare relay", () => {
     const pairing = await requestJSON("/v1/pairings/claim", {
       method: "POST",
       body: { pairing_code: registration.body.pairing_code },
+    });
+    const unauthorizedDiagnostic = await requestJSON("/v1/agent-diagnostics/live-voice", {
+      method: "POST",
+      body: {},
+    });
+    expect(unauthorizedDiagnostic.status).toBe(401);
+    const diagnostic = await requestJSON("/v1/agent-diagnostics/live-voice", {
+      method: "POST",
+      token: pairing.body.agent_token,
+      body: {},
+    });
+    expect(diagnostic.status).toBe(200);
+    expect(diagnostic.body).toEqual({
+      ok: true,
+      provider: "xai",
+      model: "grok-voice-think-fast-2.0",
+      ephemeral_credential_minted: true,
     });
     const call = await requestJSON("/v1/calls", {
       method: "POST",
@@ -297,7 +418,7 @@ describe("Cloudflare relay", () => {
       },
     });
     const bootstrap = await requestJSON(
-      `/v1/installations/${registration.body.installation_id}/calls/${call.body.id}/voice-bootstrap`,
+      `/v1/installations/${registration.body.installation_id}/calls/${call.body.id.toUpperCase()}/voice-bootstrap`,
       { method: "POST", token: registration.body.installation_secret, body: {} },
     );
     expect(bootstrap.status).toBe(200);
@@ -307,6 +428,8 @@ describe("Cloudflare relay", () => {
       allowed_tools: ["ask_hermes", "check_hermes_task"],
     });
     expect(bootstrap.body.session.instructions).toContain("A decision is due");
+    expect(bootstrap.body.session.instructions).toContain("context_scope independent");
+    expect(bootstrap.body.session.instructions).toContain("unrelated work never shares a Hermes session");
     expect(JSON.stringify(bootstrap.body)).not.toContain("XAI_API_KEY");
   });
 });

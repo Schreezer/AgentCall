@@ -93,7 +93,7 @@ struct VoiceBootstrapClient: Sendable {
 
     func create(callID: UUID) async throws -> VoiceBootstrap {
         var request = authenticatedRequest(
-            path: "v1/installations/\(installationID)/calls/\(callID.uuidString)/voice-bootstrap"
+            path: "v1/installations/\(installationID)/calls/\(callID.uuidString.lowercased())/voice-bootstrap"
         )
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

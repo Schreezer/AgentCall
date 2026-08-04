@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 @testable import AgentCaller
 
@@ -56,5 +57,12 @@ final class IncomingCallTests: XCTestCase {
             "mode": "live_voice",
         ]))
         XCTAssertEqual(call.mode, .liveVoice)
+    }
+
+    func testLiveCallsDefaultToReceiverWhileAllowingBluetooth() {
+        XCTAssertEqual(CallAudioRoutePolicy.category, .playAndRecord)
+        XCTAssertEqual(CallAudioRoutePolicy.mode, .voiceChat)
+        XCTAssertTrue(CallAudioRoutePolicy.options.contains(.allowBluetoothHFP))
+        XCTAssertFalse(CallAudioRoutePolicy.options.contains(.defaultToSpeaker))
     }
 }

@@ -30,47 +30,27 @@ Content-Type: application/json
 
 Store the returned `agent_token` as `CALLER_AGENT_TOKEN` in the supervised Hermes environment with mode `600`. The code expires and can be claimed only once. Never print the credential or include it in normal chat or logs.
 
-## Install the skill
+## Install the signed managed skill
 
-Create an agentskills-compatible `urgent-caller` skill under the normal Hermes skills directory. Add a small client accepting:
+Require Python 3 and OpenSSL. Download:
 
-- required `--message` between 1 and 500 characters;
-- optional timezone-aware `--at`;
-- optional `--caller-name`;
-- optional `--audio-file` and `--audio-content-type`;
-- required stable, event-specific `--idempotency-key`.
-
-When `--audio-file` is present, upload its raw bytes first:
-
-```http
-POST $CALLER_RELAY_URL/v1/audio
-Authorization: Bearer $CALLER_AGENT_TOKEN
-Content-Type: <detected audio MIME type>
-Idempotency-Key: <stable audio upload key>
-X-Audio-Filename: <filename>
-
-<audio bytes>
+```text
+$CALLER_RELAY_URL/v1/agent-package/urgent-caller/bootstrap.py
 ```
 
-Use the returned `audio_id` in the call body. Keep `message` populated as the text-to-speech fallback if the audio download or decoding fails.
+Before executing it, require this exact SHA-256:
 
-The client sends:
-
-```http
-POST $CALLER_RELAY_URL/v1/calls
-Authorization: Bearer $CALLER_AGENT_TOKEN
-Content-Type: application/json
-Idempotency-Key: <stable-event-key>
-
-{
-  "caller_name":"Hermes",
-  "message":"The urgent fact to speak",
-  "audio_id":"<optional uploaded audio ID>",
-  "scheduled_at":"2026-07-12T05:50:00+05:30"
-}
+```text
+f062650d388d7a8c78cdd09b6e8951264241c1a6160102b691beadb7e2d6d572
 ```
 
-Omit `scheduled_at` for an immediate call. Audio is limited to 5 MB by default and expires after one hour, so schedule the client to upload near the due time rather than uploading long-lived speech files. For reliable user-owned scheduling, prefer the existing Hermes scheduler or one supervised local service with persistent SQLite state on this VPS. Do not create another cloud server merely for Caller.
+Stop if the digest differs. Run the verified bootstrap with the stored Hermes environment file and an explicit normal skill destination ending in `/urgent-caller`. The bootstrap authenticates to the paired relay, verifies the Ed25519-signed release manifest and every file digest, self-tests the staged clients, activates atomically, and retains `.urgent-caller.previous` for rollback. Never replace this with an unattended pull from a mutable Git branch or instructions scraped from a website.
+
+Use the existing Hermes scheduler or one supervised local timer to run `scripts/update.py` daily, preferably with jitter. Compatible instruction/client fixes can install automatically. If a signed release expands capabilities, permissions, or tool scope, the updater must stop with `approval_required`; show the signed release notes and use `--approve-capability-update` only after explicit user approval.
+
+The installed skill supports message, audio, and live Grok calls. A live call requires `--live`, `--reason`, `--relevant-context`, `--desired-outcome`, `--urgency`, and the active `HERMES_SESSION_ID`. Never invent, summarize, print, or expose that session ID. Put only the minimum opening context in the briefing; Grok receives fresh voice instructions after answer and can use `ask_hermes` to consult the signed originating session.
+
+Keep `message` populated as the 1-to-500-character fallback. Audio is limited to 5 MB and expires after one hour, so upload scheduled audio near due time. Use a timezone-aware timestamp and stable event-specific idempotency key.
 
 For an immediate call, poll `GET $CALLER_RELAY_URL/v1/calls/:id` with the same bearer token for up to 15 seconds, until the status becomes `delivered` or `failed`. Do not stop at the initial `scheduled` response. Treat `delivered` as APNs acceptance, not proof that the phone rang or the user answered. If delivery fails, report `delivery_errors` and send the urgent content through the current chat channel as a fallback.
 
@@ -80,6 +60,7 @@ For an immediate call, poll `GET $CALLER_RELAY_URL/v1/calls/:id` with the same b
 - Never infer urgency merely because something is overdue.
 - Never put credentials or private content into the spoken message unless I explicitly requested that content.
 - Verify pairing and skill discovery without placing a call.
+- Run `scripts/update.py --check-only`; report the installed version, signing-key fingerprint, installation path, and daily update mechanism without exposing credentials.
 - Ask my permission before exactly one test call.
 - Report the relay's call ID and terminal status when available. If it is still scheduled, explicitly say delivery is pending. Never claim the phone rang or I answered unless the relay has the corresponding event.
 

@@ -1,10 +1,38 @@
 @preconcurrency import AVFoundation
 @preconcurrency import CallKit
+import Combine
 import OSLog
 
+enum CallAudioRoutePolicy {
+    static let category: AVAudioSession.Category = .playAndRecord
+    static let mode: AVAudioSession.Mode = .voiceChat
+    static let options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP]
+}
+
+struct ActiveCallPresentation: Identifiable, Equatable {
+    let id: UUID
+    let callerName: String
+    let connectedAt: Date
+    let isLiveVoice: Bool
+}
+
+struct CallAudioRouteOption: Identifiable, Equatable {
+    enum Kind: Equatable {
+        case receiver
+        case speaker
+        case input(uid: String)
+    }
+
+    let id: String
+    let name: String
+    let systemImage: String
+    let kind: Kind
+}
+
 @MainActor
-final class CallCoordinator: NSObject, @unchecked Sendable {
+final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
     private let provider: CXProvider
+    private let callController = CXCallController()
     private let logger = Logger(subsystem: "com.chirag.agentcaller", category: "CallKit")
     private let speechSynthesizer = AVSpeechSynthesizer()
     private var audioPlayer: AVAudioPlayer?
@@ -13,6 +41,12 @@ final class CallCoordinator: NSObject, @unchecked Sendable {
     private var activeCallID: UUID?
     private var voiceSession: GrokVoiceSession?
     weak var configuration: ConnectionConfiguration?
+
+    @Published private(set) var activeCall: ActiveCallPresentation?
+    @Published private(set) var isMuted = false
+    @Published private(set) var isSpeakerEnabled = false
+    @Published private(set) var audioRouteName = "iPhone"
+    @Published private(set) var availableAudioRoutes: [CallAudioRouteOption] = []
 
     override init() {
         let configuration = CXProviderConfiguration()
@@ -25,6 +59,13 @@ final class CallCoordinator: NSObject, @unchecked Sendable {
         super.init()
         provider.setDelegate(self, queue: .main)
         speechSynthesizer.delegate = self
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(audioRouteDidChange),
+            name: AVAudioSession.routeChangeNotification,
+            object: nil
+        )
+        refreshAudioRoutes()
     }
 
     func prepareMicrophonePermission() {
@@ -77,6 +118,7 @@ final class CallCoordinator: NSObject, @unchecked Sendable {
         speechSynthesizer.stopSpeaking(at: .immediate)
         calls.removeAll()
         activeCallID = nil
+        resetCallPresentation()
     }
 
     func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
@@ -86,8 +128,20 @@ final class CallCoordinator: NSObject, @unchecked Sendable {
         }
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
+            try session.setCategory(
+                CallAudioRoutePolicy.category,
+                mode: CallAudioRoutePolicy.mode,
+                options: CallAudioRoutePolicy.options
+            )
             activeCallID = call.id
+            activeCall = ActiveCallPresentation(
+                id: call.id,
+                callerName: call.callerName,
+                connectedAt: Date(),
+                isLiveVoice: call.mode == .liveVoice
+            )
+            isMuted = false
+            refreshAudioRoutes()
             action.fulfill()
         } catch {
             action.fail()
@@ -104,11 +158,25 @@ final class CallCoordinator: NSObject, @unchecked Sendable {
         audioPlayer = nil
         speechSynthesizer.stopSpeaking(at: .immediate)
         calls.removeValue(forKey: action.callUUID)
-        if activeCallID == action.callUUID { activeCallID = nil }
+        if activeCallID == action.callUUID {
+            activeCallID = nil
+            resetCallPresentation()
+        }
+        action.fulfill()
+    }
+
+    func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
+        guard activeCallID == action.callUUID else {
+            action.fail()
+            return
+        }
+        voiceSession?.setMuted(action.isMuted)
+        isMuted = action.isMuted
         action.fulfill()
     }
 
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
+        refreshAudioRoutes()
         guard let activeCallID, let call = calls[activeCallID] else { return }
         if call.mode == .liveVoice {
             startLiveVoice(for: call)
@@ -125,6 +193,28 @@ final class CallCoordinator: NSObject, @unchecked Sendable {
         audioPlayer?.stop()
         audioPlayer = nil
         speechSynthesizer.stopSpeaking(at: .immediate)
+    }
+
+    func toggleMute() {
+        guard let activeCallID else { return }
+        let action = CXSetMutedCallAction(call: activeCallID, muted: !isMuted)
+        request(CXTransaction(action: action), failureMessage: "Could not change microphone mute")
+    }
+
+    func toggleSpeaker() {
+        selectAudioRoute(isSpeakerEnabled ? .receiver : .speaker)
+    }
+
+    func selectAudioRoute(_ option: CallAudioRouteOption) {
+        selectAudioRoute(option.kind)
+    }
+
+    func endActiveCall() {
+        guard let activeCallID else { return }
+        request(
+            CXTransaction(action: CXEndCallAction(call: activeCallID)),
+            failureMessage: "Could not end call"
+        )
     }
 
     private func startLiveVoice(for call: IncomingCall) {
@@ -222,6 +312,70 @@ final class CallCoordinator: NSObject, @unchecked Sendable {
         provider.reportCall(with: id, endedAt: Date(), reason: .remoteEnded)
         calls.removeValue(forKey: id)
         activeCallID = nil
+        resetCallPresentation()
+    }
+
+    private func request(_ transaction: CXTransaction, failureMessage: String) {
+        callController.request(transaction) { [weak self] error in
+            guard let error else { return }
+            Task { @MainActor [weak self] in
+                self?.logger.error("\(failureMessage, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func selectAudioRoute(_ kind: CallAudioRouteOption.Kind) {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            switch kind {
+            case .speaker:
+                try session.setPreferredInput(session.availableInputs?.first(where: { $0.portType == .builtInMic }))
+                try session.overrideOutputAudioPort(.speaker)
+            case .receiver:
+                try session.setPreferredInput(session.availableInputs?.first(where: { $0.portType == .builtInMic }))
+                try session.overrideOutputAudioPort(.none)
+            case .input(let uid):
+                guard let input = session.availableInputs?.first(where: { $0.uid == uid }) else { return }
+                try session.overrideOutputAudioPort(.none)
+                try session.setPreferredInput(input)
+            }
+            refreshAudioRoutes()
+        } catch {
+            logger.error("Audio route change failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    @objc private func audioRouteDidChange() {
+        refreshAudioRoutes()
+    }
+
+    private func refreshAudioRoutes() {
+        let session = AVAudioSession.sharedInstance()
+        let output = session.currentRoute.outputs.first
+        isSpeakerEnabled = output?.portType == .builtInSpeaker
+        audioRouteName = output?.portName ?? (isSpeakerEnabled ? "Speaker" : "iPhone")
+
+        var routes = [
+            CallAudioRouteOption(id: "receiver", name: "iPhone", systemImage: "iphone", kind: .receiver),
+            CallAudioRouteOption(id: "speaker", name: "Speaker", systemImage: "speaker.wave.3.fill", kind: .speaker),
+        ]
+        for input in session.availableInputs ?? [] where input.portType != .builtInMic {
+            routes.append(CallAudioRouteOption(
+                id: input.uid,
+                name: input.portName,
+                systemImage: input.portType == .headsetMic ? "headphones" : "airpodspro",
+                kind: .input(uid: input.uid)
+            ))
+        }
+        availableAudioRoutes = routes
+    }
+
+    private func resetCallPresentation() {
+        activeCall = nil
+        isMuted = false
+        isSpeakerEnabled = false
+        audioRouteName = "iPhone"
+        availableAudioRoutes = []
     }
 }
 
