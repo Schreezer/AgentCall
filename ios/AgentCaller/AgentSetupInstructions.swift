@@ -25,7 +25,8 @@ enum AgentSetupInstructions {
         4. Run the verified bootstrap with the existing environment file and the existing explicit
            `urgent-caller` skill destination. It authenticates with the stored agent token, verifies
            the signed Ed25519 manifest and every file digest, self-tests the staged scripts, activates
-           the update atomically, and retains `.urgent-caller.previous` for rollback.
+           the update atomically, and retains the previous version outside the discoverable skills
+           tree under `.caller-skill-rollbacks/skills/urgent-caller` for rollback.
         5. Run `scripts/update.py --check-only` after installation. If the signed release is marked as
            a capability, permission, or tool-scope expansion, stop at `approval_required`, show me the
            signed release notes, and use `--approve-capability-update` only after I explicitly approve.
@@ -106,7 +107,8 @@ enum AgentSetupInstructions {
         - Run the verified bootstrap with the stored Hermes environment file and an explicit skill
           destination ending in `/urgent-caller`. It authenticates to the relay, verifies the signed
           Ed25519 release manifest and every file digest, self-tests the staged scripts, activates the
-          skill atomically, and retains `.urgent-caller.previous` for rollback.
+          skill atomically, and retains the previous version outside the discoverable skills tree
+          under `.caller-skill-rollbacks/skills/urgent-caller` for rollback.
         - Never replace this with an unattended pull from a mutable Git branch or instructions copied
           from a website.
 

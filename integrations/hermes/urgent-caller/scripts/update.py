@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 
 SKILL_NAME = "urgent-caller"
-CURRENT_VERSION = "0.4.0"
+CURRENT_VERSION = "0.4.1"
 USER_AGENT = f"AgentCall-Hermes/{CURRENT_VERSION}"
 TRUSTED_RELEASE_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA0PXJ6vcqM8/U55Og/X1tPEq4zJk2WwYfiGbeGNTGW9g=
@@ -172,6 +172,19 @@ def self_test(stage):
             raise RuntimeError(f"staged {script_name} self-test failed")
 
 
+def remove_path(path):
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def rollback_dir_for(skill_dir):
+    return skill_dir.parent.parent / ".caller-skill-rollbacks" / skill_dir.parent.name / skill_dir.name
+
+
 def activate(stage, skill_dir, manifest):
     state = {
         "skill_name": SKILL_NAME,
@@ -182,12 +195,19 @@ def activate(stage, skill_dir, manifest):
     (stage / ".caller-release.json").write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
     (stage / ".caller-release.json").chmod(0o644)
 
-    previous = skill_dir.with_name(f".{skill_dir.name}.previous")
-    if previous.exists():
-        if previous.is_dir() and not previous.is_symlink():
-            shutil.rmtree(previous)
-        else:
-            previous.unlink()
+    # Hermes discovers SKILL.md files recursively inside its skills directory,
+    # including hidden directories. Keep the rollback outside that tree so the
+    # retained copy cannot collide with the active skill.
+    previous = rollback_dir_for(skill_dir)
+    previous.parent.mkdir(parents=True, exist_ok=True)
+    previous.parent.chmod(0o700)
+    remove_path(previous)
+
+    # Migrate the rollback location used by Caller 0.4.0. Leaving this directory
+    # in place makes Hermes see two skills named urgent-caller.
+    legacy_previous = skill_dir.with_name(f".{skill_dir.name}.previous")
+    remove_path(legacy_previous)
+
     if skill_dir.exists():
         skill_dir.rename(previous)
     try:

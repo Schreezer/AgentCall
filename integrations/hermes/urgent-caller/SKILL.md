@@ -27,7 +27,7 @@ Caller releases are retrieved from the paired relay, verified against the public
 python3 scripts/update.py
 ```
 
-Compatible instruction and client fixes install automatically. If the signed manifest marks a release as capability-expanding or approval-required, the updater exits without changing the skill. Show the release notes to the user and rerun with `--approve-capability-update` only after explicit approval. Never replace this process with an automatic pull from a mutable Git branch or instructions scraped from a website. The previous verified installation is retained next to the skill as `.urgent-caller.previous` for rollback.
+Compatible instruction and client fixes install automatically. If the signed manifest marks a release as capability-expanding or approval-required, the updater exits without changing the skill. Show the release notes to the user and rerun with `--approve-capability-update` only after explicit approval. Never replace this process with an automatic pull from a mutable Git branch or instructions scraped from a website. The previous verified installation is retained outside the discoverable skills tree under `.caller-skill-rollbacks/skills/urgent-caller` for rollback.
 
 ## Place or schedule a call
 

@@ -61,7 +61,8 @@ try {
     name: "ask_hermes",
     arguments: {
       request: "This is a Caller production integration smoke test. Reply with exactly CALLER_MCP_LIVE_OK and nothing else. Do not use tools.",
-      session_mode: "new",
+      context_scope: "independent",
+      independent_context: "caller-production-smoke",
     },
   });
   let operation = toolPayload(accepted);

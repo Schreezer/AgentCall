@@ -50,7 +50,7 @@ describe("Cloudflare relay", () => {
     expect(manifest.status).toBe(200);
     expect(manifest.body.manifest).toMatchObject({
       skill_name: "urgent-caller",
-      skill_version: "0.4.0",
+      skill_version: "0.4.1",
       requires_user_approval: false,
     });
     const bootstrap = await exports.default.fetch(
@@ -59,7 +59,7 @@ describe("Cloudflare relay", () => {
     expect(bootstrap.status).toBe(200);
     expect(await bootstrap.text()).toContain("Bootstrap the signed urgent-caller skill");
     const skillFile = await exports.default.fetch(
-      "https://relay.test/v1/agent-package/urgent-caller/files/0.4.0/SKILL.md",
+      "https://relay.test/v1/agent-package/urgent-caller/files/0.4.1/SKILL.md",
       { headers: { authorization: `Bearer ${pairing.body.agent_token}` } },
     );
     expect(skillFile.status).toBe(200);

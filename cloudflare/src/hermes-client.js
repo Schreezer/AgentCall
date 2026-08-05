@@ -1,4 +1,4 @@
-const HERMES_ORIGIN = "http://localhost:8642";
+export const HERMES_ORIGIN = "http://127.0.0.1:8642";
 
 export class HermesClient {
   constructor(env) {
@@ -12,7 +12,7 @@ export class HermesClient {
   async createSession(sessionID) {
     return this.request("/api/sessions", {
       method: "POST",
-      body: { id: sessionID, title: "Caller voice session" },
+      body: { id: sessionID, title: `Caller voice ${sessionID}` },
       accepted: [201, 409],
     });
   }
@@ -88,7 +88,8 @@ export class HermesClient {
       payload = { error: text.slice(0, 500) };
     }
     if (!accepted.includes(response.status)) {
-      const error = Object.assign(new Error(`hermes_http_${response.status}`), {
+      const detail = hermesErrorDetail(payload);
+      const error = Object.assign(new Error(`hermes_http_${response.status}${detail ? `:${detail}` : ""}`), {
         status: response.status,
         payload,
       });
@@ -96,4 +97,15 @@ export class HermesClient {
     }
     return { status: response.status, payload, headers: response.headers };
   }
+}
+
+function hermesErrorDetail(payload) {
+  const error = payload?.error;
+  const raw =
+    typeof error === "string"
+      ? error
+      : error && typeof error === "object"
+        ? [error.code, error.type, error.message].filter(Boolean).join(":")
+        : "";
+  return raw.replaceAll(/\s+/g, " ").slice(0, 240);
 }

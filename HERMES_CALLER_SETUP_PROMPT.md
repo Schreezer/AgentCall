@@ -44,7 +44,7 @@ Before executing it, require this exact SHA-256:
 f062650d388d7a8c78cdd09b6e8951264241c1a6160102b691beadb7e2d6d572
 ```
 
-Stop if the digest differs. Run the verified bootstrap with the stored Hermes environment file and an explicit normal skill destination ending in `/urgent-caller`. The bootstrap authenticates to the paired relay, verifies the Ed25519-signed release manifest and every file digest, self-tests the staged clients, activates atomically, and retains `.urgent-caller.previous` for rollback. Never replace this with an unattended pull from a mutable Git branch or instructions scraped from a website.
+Stop if the digest differs. Run the verified bootstrap with the stored Hermes environment file and an explicit normal skill destination ending in `/urgent-caller`. The bootstrap authenticates to the paired relay, verifies the Ed25519-signed release manifest and every file digest, self-tests the staged clients, activates atomically, and retains the previous version outside the discoverable skills tree under `.caller-skill-rollbacks/skills/urgent-caller`. Never replace this with an unattended pull from a mutable Git branch or instructions scraped from a website.
 
 Use the existing Hermes scheduler or one supervised local timer to run `scripts/update.py` daily, preferably with jitter. Compatible instruction/client fixes can install automatically. If a signed release expands capabilities, permissions, or tool scope, the updater must stop with `approval_required`; show the signed release notes and use `--approve-capability-update` only after explicit user approval.
 

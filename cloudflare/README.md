@@ -11,7 +11,7 @@ This is the durable deployment target for AgentCall. In addition to the message/
 | `SCHEDULER` | Per-installation Durable Object alarm for due calls and audio cleanup |
 | `HERMES_COORDINATOR` | Per-installation ordering, session grants, operation projection, and reconciliation |
 | `HERMES_OPERATION_WORKFLOW` | Durable Hermes submission, polling, approval wait, and completion handling |
-| `HERMES_PRIVATE` | Workers VPC Service bound through Cloudflare Tunnel to Hermes on `localhost:8642` |
+| `HERMES_PRIVATE` | Workers VPC Service bound through Cloudflare Tunnel to Hermes on `127.0.0.1:8642` |
 
 `APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_PRIVATE_KEY`, `XAI_API_KEY`, and `HERMES_API_KEY` must be Worker secrets. Permanent xAI and Hermes credentials must never be shipped in the iOS app. `APNS_BUNDLE_ID` is a non-secret variable in `wrangler.jsonc`.
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,7 @@ import test from "node:test";
 import { releaseMetadata } from "../src/skill-release.js";
 
 test("the pinned bootstrap verifies and atomically installs the signed skill", async () => {
-  const fixture = await updaterFixture(false);
+  const fixture = await updaterFixture(false, true);
   try {
     const result = await runPython(fixture.bootstrapPath, [
       "--relay-url", fixture.baseURL,
@@ -18,12 +18,14 @@ test("the pinned bootstrap verifies and atomically installs the signed skill", a
     assert.equal(result.code, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), {
       status: "updated",
-      installed_version: "0.4.0",
-      previous_version: "0.0.0",
+      installed_version: "0.4.1",
+      previous_version: "0.3.0",
     });
     const state = JSON.parse(await readFile(join(fixture.skillPath, ".caller-release.json"), "utf8"));
-    assert.equal(state.skill_version, "0.4.0");
+    assert.equal(state.skill_version, "0.4.1");
     assert.match(await readFile(join(fixture.skillPath, "SKILL.md"), "utf8"), /keep the skill current/i);
+    assert.equal(await readFile(join(fixture.rollbackPath, "SKILL.md"), "utf8"), "old active skill\n");
+    await assert.rejects(access(fixture.legacyPreviousPath));
 
     const check = await runPython(join(fixture.skillPath, "scripts/update.py"), [
       "--relay-url", fixture.baseURL,
@@ -54,14 +56,23 @@ test("the bootstrap rejects a manifest changed after signing", async () => {
   }
 });
 
-async function updaterFixture(tamperManifest) {
+async function updaterFixture(tamperManifest, seedExisting = false) {
   const release = releaseMetadata();
   const root = await mkdtemp(join(tmpdir(), "caller-updater-test-"));
   const envPath = join(root, "hermes.env");
   const bootstrapPath = join(root, "bootstrap.py");
   const skillPath = join(root, "skills", "urgent-caller");
+  const legacyPreviousPath = join(root, "skills", ".urgent-caller.previous");
+  const rollbackPath = join(root, ".caller-skill-rollbacks", "skills", "urgent-caller");
   await writeFile(envPath, "CALLER_AGENT_TOKEN=test-agent-token\n", { mode: 0o600 });
   await writeFile(bootstrapPath, release.bootstrap, { mode: 0o700 });
+  if (seedExisting) {
+    await mkdir(skillPath, { recursive: true });
+    await writeFile(join(skillPath, "SKILL.md"), "old active skill\n");
+    await writeFile(join(skillPath, ".caller-release.json"), JSON.stringify({ skill_version: "0.3.0" }));
+    await mkdir(legacyPreviousPath, { recursive: true });
+    await writeFile(join(legacyPreviousPath, "SKILL.md"), "stale discoverable rollback\n");
+  }
 
   const server = createServer((request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
@@ -98,6 +109,8 @@ async function updaterFixture(tamperManifest) {
     bootstrapPath,
     envPath,
     skillPath,
+    legacyPreviousPath,
+    rollbackPath,
     async close() {
       await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       await rm(root, { recursive: true, force: true });

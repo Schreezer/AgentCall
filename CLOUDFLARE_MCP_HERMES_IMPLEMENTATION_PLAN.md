@@ -486,7 +486,7 @@ The token is stored only as a cryptographic hash in D1. Authorization is checked
 
 - Hermes remains on `127.0.0.1:8642`.
 - `cloudflared` establishes an outbound QUIC tunnel.
-- A Workers VPC Service binding targets only `localhost:8642`, reducing SSRF scope.
+- A Workers VPC Service binding targets only `127.0.0.1:8642`, reducing SSRF scope and avoiding IPv6 localhost resolution where Hermes is not listening.
 - The Worker invokes Hermes through the binding rather than a public URL.
 - No API key, briefing, session ID, or MCP token is placed in APNs or logs.
 
@@ -598,7 +598,7 @@ No repository code is deployed as an AWS bridge. Operational work is limited to:
 1. Test, commit, and deploy the durable-run plus request-toolset Hermes API prerequisite; restart only the existing gateway and re-probe it.
 2. Confirm the installed `cloudflared` is current enough for Workers VPC (live evidence: `2026.3.0`).
 3. Create an outbound QUIC tunnel.
-4. Register a Workers VPC Service targeting `localhost:8642`.
+4. Register a Workers VPC Service targeting `127.0.0.1:8642`.
 5. Install and enable the `cloudflared` service.
 6. Verify no inbound security-group port is added.
 
@@ -692,7 +692,7 @@ The reviewer must explicitly verify:
 
 1. Does xAI Speech-to-Speech truly execute Remote MCP tools server-side, leaving the phone out of tool execution?
 2. Is the proposed Cloudflare Streamable HTTP implementation compatible with xAI's supported MCP transport and authentication?
-3. Can Workers VPC bind the existing Worker to a tunnel targeting `localhost:8642` without a public hostname?
+3. Can Workers VPC bind the existing Worker to a tunnel targeting `127.0.0.1:8642` without a public hostname?
 4. Does durable `continue_session` preserve native tool context and expose a trustworthy pause-before-tool approval boundary and reconciliation state?
 5. Does a Workflow plus one installation coordinator preserve Caller-channel ordering across Cloudflare restarts and session-ID rotation without overstating global Hermes serialization?
 6. Is any separate AWS application still necessary?
@@ -712,7 +712,7 @@ The independent reviewer completed four revise cycles. The final verdict was **A
 The implementation is live with this boundary:
 
 - Caller Worker: `https://agentcall-relay.chiragmgg.workers.dev`, deployed version `331777ed-5629-44de-ac74-78c7ade7f7cd`.
-- Private path: a Workers VPC Service targets the existing healthy Cloudflare tunnel at Hermes `localhost:8642`; no public Hermes port or separate AWS bridge application was added.
+- Private path: a Workers VPC Service targets the existing healthy Cloudflare tunnel at Hermes `127.0.0.1:8642`; no public Hermes port or separate AWS bridge application was added.
 - Hermes: upgraded to `0.19.1`, durable run capabilities enabled, and voice requests restricted to the server-configured `web` and `session_search` toolsets.
 - Remote MCP: production discovery returns exactly `ask_hermes` and `check_hermes_task`.
 - Production smoke: the Worker minted an xAI ephemeral token, initialized MCP, created a disposable Hermes session, polled the durable operation, and received the exact Hermes answer `CALLER_MCP_LIVE_OK`.

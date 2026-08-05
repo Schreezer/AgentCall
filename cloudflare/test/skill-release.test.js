@@ -7,7 +7,7 @@ import { releaseMetadata, withSkillReleaseHeaders } from "../src/skill-release.j
 test("ships a complete hash-verified and Ed25519-signed urgent-caller release", () => {
   const release = releaseMetadata();
   assert.equal(release.manifest.skill_name, "urgent-caller");
-  assert.equal(release.manifest.skill_version, "0.4.0");
+  assert.equal(release.manifest.skill_version, "0.4.1");
   assert.equal(release.manifest.change_class, "compatible");
   assert.equal(release.manifest.requires_user_approval, false);
 
@@ -44,7 +44,7 @@ test("ships a complete hash-verified and Ed25519-signed urgent-caller release", 
 });
 
 test("advertises compatible, available, and required skill update states", async () => {
-  const current = withSkillReleaseHeaders(new Response("ok"), requestWithVersion("0.4.0"));
+  const current = withSkillReleaseHeaders(new Response("ok"), requestWithVersion("0.4.1"));
   assert.equal(current.headers.get("x-caller-skill-update"), "current");
 
   const available = withSkillReleaseHeaders(new Response("ok"), requestWithVersion("0.3.0"));

@@ -11,7 +11,7 @@
     "check:skill-release": "node scripts/build-skill-release.mjs --check",
     "dev": "wrangler dev",
     "test": "npm run check:skill-release && npm run test:unit && npm run test:worker",
-    "test:unit": "node --test test/core.test.js test/apns.test.js test/skill-release.test.js test/skill-updater.test.js test/voice-bootstrap.test.js",
+    "test:unit": "node --test test/core.test.js test/apns.test.js test/hermes-client.test.js test/skill-release.test.js test/skill-updater.test.js test/voice-bootstrap.test.js",
     "test:worker": "vitest run",
     "types": "wrangler types worker-configuration.d.ts --include-runtime false",
     "check": "wrangler types --check --include-runtime false && tsc --noEmit && wrangler deploy --dry-run --outdir dist && wrangler check startup --outfile dist/worker-startup.cpuprofile",
