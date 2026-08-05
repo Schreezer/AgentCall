@@ -81,6 +81,9 @@ try {
   if (operation.status !== "answered") {
     throw new Error(`hermes_operation_${operation.status || "timed_out"}:${operation.error || ""}`);
   }
+  if (operation.completion_delivery !== "automatic") {
+    throw new Error(`hermes_completion_not_automatic:${operation.completion_delivery || "missing"}`);
+  }
   if (!String(operation.answer || "").includes("CALLER_MCP_LIVE_OK")) {
     throw new Error(`unexpected_hermes_answer:${operation.answer || "missing"}`);
   }
@@ -90,6 +93,7 @@ try {
     xai_ephemeral_token: "minted",
     mcp_tools: toolNames,
     hermes_status: operation.status,
+    completion_delivery: operation.completion_delivery,
     hermes_answer: "CALLER_MCP_LIVE_OK",
     hermes_session_id: operation.hermes_session_id,
   }));

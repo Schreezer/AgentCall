@@ -50,7 +50,7 @@ describe("Cloudflare relay", () => {
     expect(manifest.status).toBe(200);
     expect(manifest.body.manifest).toMatchObject({
       skill_name: "urgent-caller",
-      skill_version: "0.4.1",
+      skill_version: "0.4.2",
       requires_user_approval: false,
     });
     const bootstrap = await exports.default.fetch(
@@ -59,7 +59,7 @@ describe("Cloudflare relay", () => {
     expect(bootstrap.status).toBe(200);
     expect(await bootstrap.text()).toContain("Bootstrap the signed urgent-caller skill");
     const skillFile = await exports.default.fetch(
-      "https://relay.test/v1/agent-package/urgent-caller/files/0.4.1/SKILL.md",
+      "https://relay.test/v1/agent-package/urgent-caller/files/0.4.2/SKILL.md",
       { headers: { authorization: `Bearer ${pairing.body.agent_token}` } },
     );
     expect(skillFile.status).toBe(200);
@@ -285,6 +285,7 @@ describe("Cloudflare relay", () => {
     ]);
     const askHermes = listed.body.result.tools.find((tool) => tool.name === "ask_hermes");
     expect(askHermes.description).toContain("explicit context boundary");
+    expect(askHermes.description).toContain("returns its final result automatically");
     expect(askHermes.inputSchema.required).toEqual(["request", "context_scope"]);
     expect(Object.keys(askHermes.inputSchema.properties)).toEqual([
       "request",
@@ -300,7 +301,10 @@ describe("Cloudflare relay", () => {
         arguments: { request: "Summarize the call decision", context_scope: "origin" },
       },
     }, token);
-    expect(origin.body.result.structuredContent).toMatchObject({ status: "queued" });
+    expect(origin.body.result.structuredContent).toMatchObject({
+      status: "queued",
+      completion_delivery: "manual_fallback",
+    });
     expect(origin.body.result.structuredContent).not.toHaveProperty("hermes_session_id");
 
     const independentFirst = await mcpRequest({
@@ -429,6 +433,7 @@ describe("Cloudflare relay", () => {
     });
     expect(bootstrap.body.session.instructions).toContain("A decision is due");
     expect(bootstrap.body.session.instructions).toContain("context_scope independent");
+    expect(bootstrap.body.session.instructions).toContain("injected into this conversation automatically");
     expect(bootstrap.body.session.instructions).toContain("unrelated work never shares a Hermes session");
     expect(JSON.stringify(bootstrap.body)).not.toContain("XAI_API_KEY");
   });

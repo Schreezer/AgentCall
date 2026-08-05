@@ -271,11 +271,12 @@ Possible output:
   "hermes_session_id": "current canonical raw ID",
   "answer": "present when answered",
   "summary": "present when work continues",
+  "completion_delivery": "automatic | manual_fallback",
   "user_action": "present when an authenticated non-MCP confirmation is required"
 }
 ```
 
-`ask_hermes` durably accepts the operation and starts one Workflow instance. It may briefly poll the coordinator for a fast terminal answer, but the initial production default is a conservative, configurable sub-second window until the real xAI Remote MCP timeout is characterized. If the Hermes turn is still active, it returns `working`; it never launches a second Hermes turn merely to improve latency.
+`ask_hermes` durably accepts the operation, starts one Workflow instance, and keeps the Remote MCP request open for a configurable 45-second completion window. xAI automatically injects the returned terminal MCP result into Grok. Only unusually long work returns `completion_delivery: manual_fallback`; no second Hermes turn is launched merely to improve latency.
 
 ### 5.2 `check_hermes_task`
 
@@ -366,8 +367,8 @@ For each `tools/call`, the MCP handler derives a replay key from the call scope,
 
 xAI publishes no guaranteed Remote MCP tool timeout. The production contract therefore does not depend on a guessed two-second window:
 
-- `ask_hermes` durably creates one logical operation, schedules its deterministic Workflow, then returns `working` quickly unless that same operation has already completed within a conservative configurable poll window.
-- Grok remains conversational and can call `check_hermes_task` using the returned operation ID.
+- `ask_hermes` durably creates one logical operation, schedules its deterministic Workflow, and waits up to 45 seconds for that same operation to become terminal so xAI automatically injects the final MCP result into Grok.
+- Grok calls `check_hermes_task` only after the explicit `manual_fallback` result or when the user asks for an interim status.
 - Accepted orchestration continues durably through a Cloudflare Workflow; the underlying Hermes turn has the restart and ambiguous-outcome limits stated above.
 - A P0 characterization harness exposes authenticated 1/2/5/10/30-second no-op MCP probes in staging only. Those measurements tune, but never become, a correctness dependency.
 - If completion occurs after hangup, the coordinator writes an outbox item and the existing scheduler creates a follow-up Caller/APNs call. The follow-up call is separately authenticated and bootstrapped with a grant for that exact operation ID.
@@ -666,7 +667,7 @@ Deployment order is: deploy code with dormant feature flag and new bindings, app
 ## 14. Acceptance Criteria
 
 - xAI can initialize the deployed Remote MCP server and discover only `ask_hermes` and `check_hermes_task`.
-- `ask_hermes(new)` returns a real Hermes session ID and answer or durable working operation.
+- `ask_hermes(new)` automatically returns the terminal Hermes answer for ordinary work, or an explicit durable `manual_fallback` operation when it exceeds the bounded wait.
 - `ask_hermes(continue, returned_id)` reaches the same Hermes lineage.
 - Compression-ID rotation is resolved before and after work and the current ID is returned.
 - Two Caller-originated same-lineage operations preserve FIFO ordering; two different lineages may proceed concurrently. No global cross-client lock is claimed.
@@ -696,7 +697,7 @@ The reviewer must explicitly verify:
 4. Does durable `continue_session` preserve native tool context and expose a trustworthy pause-before-tool approval boundary and reconciliation state?
 5. Does a Workflow plus one installation coordinator preserve Caller-channel ordering across Cloudflare restarts and session-ID rotation without overstating global Hermes serialization?
 6. Is any separate AWS application still necessary?
-7. Does the design remain correct with an immediate `working` response regardless of the undocumented Remote MCP timeout?
+7. Does the 45-second bounded Remote MCP wait automatically deliver ordinary terminal results while preserving an explicit durable fallback for longer work?
 8. Can the current iOS xAI WebSocket implementation be built using native APIs without adding an unnecessary audio proxy?
 9. Are there security or App Store concerns that change the planned CallKit/bootstrap boundary?
 10. Which recommendations are blockers before implementation versus later hardening?
@@ -711,13 +712,13 @@ The independent reviewer completed four revise cycles. The final verdict was **A
 
 The implementation is live with this boundary:
 
-- Caller Worker: `https://agentcall-relay.chiragmgg.workers.dev`, deployed version `331777ed-5629-44de-ac74-78c7ade7f7cd`.
+- Caller Worker: `https://agentcall-relay.chiragmgg.workers.dev`, deployed version `98590339-7ebd-4815-8495-21621863bc90`.
 - Private path: a Workers VPC Service targets the existing healthy Cloudflare tunnel at Hermes `127.0.0.1:8642`; no public Hermes port or separate AWS bridge application was added.
 - Hermes: upgraded to `0.19.1`, durable run capabilities enabled, and voice requests restricted to the server-configured `web` and `session_search` toolsets.
 - Remote MCP: production discovery returns exactly `ask_hermes` and `check_hermes_task`.
-- Production smoke: the Worker minted an xAI ephemeral token, initialized MCP, created a disposable Hermes session, polled the durable operation, and received the exact Hermes answer `CALLER_MCP_LIVE_OK`.
-- Worker verification: five Node unit tests and three Worker-runtime tests pass; type checking, dry deploy, and startup validation pass.
+- Production smoke: the Worker minted an xAI ephemeral token, initialized MCP, created a disposable Hermes session, and `ask_hermes` returned the exact terminal answer `CALLER_MCP_LIVE_OK` with `completion_delivery: automatic` in one MCP call.
+- Worker verification: 17 Node unit tests and five Worker-runtime tests pass; type checking, dry deploy, and startup validation pass.
 - Hermes verification: 31 focused durable/API/tool-policy tests and six serialized-configuration tests pass locally against the deployed code lineage. A broader relevant suite passed 173 tests; one pre-existing readiness expectation remains unrelated to this feature.
-- iOS verification: all 15 focused simulator tests pass. A signed Debug device build was installed and launched on Aeon. This proves build, signing, installation, and launch—not microphone/speaker quality or a completed human voice conversation.
+- iOS verification: all 38 simulator tests pass. A signed Debug device build was installed and launched on Aeon. This proves build, signing, installation, and launch; the separate user-heard call verifies the real audio path.
 
 The final acceptance action is therefore intentionally human: answer one live call on Aeon, grant microphone permission if prompted, interrupt Grok once, and ask it to consult Hermes. That test characterizes real audio, barge-in behavior, and xAI's server-side MCP latency; those properties cannot be truthfully proven by the automated MCP smoke.

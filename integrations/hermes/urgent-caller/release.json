@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "skill_version": "0.4.1",
+  "skill_version": "0.4.2",
   "minimum_supported_version": "0.3.0",
   "released_at": "2026-08-05T00:00:00Z",
   "change_class": "compatible",
@@ -13,5 +13,5 @@
     "signed_hermes_context",
     "managed_skill_updates"
   ],
-  "release_notes": "Moves rollback copies outside Hermes skill discovery to prevent urgent-caller name collisions."
+  "release_notes": "Automatically returns ordinary terminal Hermes results to Grok; manual task checks remain only as a bounded long-running fallback."
 }

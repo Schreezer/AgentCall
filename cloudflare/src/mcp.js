@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { bearerToken, hashCredential } from "./core.js";
+import { awaitHermesOperation, configuredHermesWaitMs } from "./hermes-operation-wait.js";
 
 export async function handleMcp(request, env, context) {
   const scope = await authorizeMcp(request, env);
@@ -28,7 +29,8 @@ function createHermesMcpServer(env, scope, requestID) {
         "the reason for this call; use independent for a different topic or task. Reuse the same " +
         "independent_context key for follow-ups to one independent task, and use a new key for another task. " +
         "Never ask the user to choose among Hermes sessions or mention internal sessions. " +
-        "The result may be working; never invent completion and use check_hermes_task with its operation_id.",
+        "This call normally waits for Hermes and returns its final result automatically. Use check_hermes_task " +
+        "only if completion_delivery is manual_fallback or the user explicitly asks for an interim status.",
       inputSchema: {
         request: z.string().trim().min(1).max(8_000).describe("A complete standalone request for Hermes."),
         context_scope: z.enum(["origin", "independent"]).describe(
@@ -51,7 +53,7 @@ function createHermesMcpServer(env, scope, requestID) {
       const requestHash = await hashCredential(stableStringify(args));
       const coordinator = env.HERMES_COORDINATOR.getByName(scope.installation_id);
       try {
-        const result = await coordinator.acceptOperation({
+        const accepted = await coordinator.acceptOperation({
           installationID: scope.installation_id,
           callID: scope.call_id,
           voiceSessionID: scope.id,
@@ -65,6 +67,11 @@ function createHermesMcpServer(env, scope, requestID) {
           activeHermesSessionID: scope.origin_hermes_session_id,
           enabledToolsets: configuredVoiceToolsets(env),
         });
+        const result = await awaitHermesOperation(
+          coordinator,
+          accepted,
+          configuredHermesWaitMs(env.HERMES_MCP_WAIT_MS),
+        );
         return toolResult(result);
       } catch (error) {
         return toolError(error?.message ?? String(error));

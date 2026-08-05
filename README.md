@@ -102,7 +102,9 @@ The `cloudflare` implementation preserves the same HTTP API while replacing loca
 - A Durable Object alarm delivers scheduled calls and removes expired audio.
 - Worker secrets hold the APNs Team ID, Key ID, and `.p8` signing key.
 - A second Durable Object plus a Workflow coordinate session-scoped Hermes operations.
-- `/mcp` exposes only `ask_hermes` and `check_hermes_task` to xAI.
+- `/mcp` exposes only `ask_hermes` and `check_hermes_task` to xAI. `ask_hermes`
+  keeps ordinary work open until a terminal result so xAI injects the answer
+  back into Grok automatically; explicit checking is only the bounded fallback.
 - A Workers VPC Service reaches the existing Hermes API without publishing port 8642.
 
 Create the resources:
