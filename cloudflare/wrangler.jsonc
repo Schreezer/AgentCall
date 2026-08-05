@@ -27,8 +27,7 @@
     "LIVE_VOICE_ENABLED": "true",
     "XAI_VOICE_MODEL": "grok-voice-think-fast-2.0",
     "XAI_VOICE": "eve",
-    "HERMES_VOICE_TOOLSETS": "web,session_search",
-    "HERMES_MCP_WAIT_MS": "45000"
+    "HERMES_VOICE_TOOLSETS": "web,session_search"
   },
   "secrets": {
     "required": ["APNS_TEAM_ID", "APNS_KEY_ID", "APNS_PRIVATE_KEY"]

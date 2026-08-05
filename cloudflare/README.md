@@ -10,7 +10,7 @@ This is the durable deployment target for AgentCall. In addition to the message/
 | `AUDIO` | R2 audio objects |
 | `SCHEDULER` | Per-installation Durable Object alarm for due calls and audio cleanup |
 | `HERMES_COORDINATOR` | Per-installation ordering, session grants, operation projection, and reconciliation |
-| `HERMES_OPERATION_WORKFLOW` | Durable Hermes submission, polling, approval wait, and completion handling |
+| `HERMES_WORKFLOW` | Durable Hermes submission, polling, approval wait, and completion handling |
 | `HERMES_PRIVATE` | Workers VPC Service bound through Cloudflare Tunnel to Hermes on `127.0.0.1:8642` |
 
 `APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_PRIVATE_KEY`, `XAI_API_KEY`, and `HERMES_API_KEY` must be Worker secrets. Permanent xAI and Hermes credentials must never be shipped in the iOS app. `APNS_BUNDLE_ID` is a non-secret variable in `wrangler.jsonc`.
@@ -29,7 +29,7 @@ npm run check
 npm run dev
 ```
 
-`npm run smoke:live-mcp` performs an authenticated production smoke with a disposable Caller installation: it mints an xAI ephemeral token, initializes `/mcp`, discovers the two tools, starts a fresh Hermes session, and requires `ask_hermes` to return the terminal answer with automatic completion delivery. Run it only with the explicit smoke-test environment values documented by the script; it deletes its Caller-side fixtures in `finally`.
+`npm run smoke:live-mcp` performs an authenticated production smoke with a disposable Caller installation: it mints an xAI ephemeral token, initializes `/mcp`, discovers the two tools, starts a fresh Hermes session, requires `ask_hermes` to acknowledge `queued` immediately, and reads the call-scoped event feed until the terminal answer arrives. Run it only with the explicit smoke-test environment values documented by the script; it deletes its Caller-side fixtures in `finally`.
 
 Copy `.dev.vars.example` to `.dev.vars` only when you have local APNs credentials to test. The API can run without them, but `/health` reports `apnsReady: false` and immediate calls finish as `failed`. Do not use a production device token against the APNs sandbox endpoint or vice versa.
 

@@ -225,10 +225,10 @@ The MCP handler:
 2. Resolves the call's installation and active Hermes lineage.
 3. Validates the tool arguments.
 4. Enqueues the operation on the installation coordinator.
-5. Uses the private VPC binding to call Hermes.
-6. Returns a structured MCP text result.
+5. Starts the durable Hermes Workflow.
+6. Returns a structured `queued` acknowledgement immediately.
 
-The result is automatically incorporated by xAI's voice agent. Grok then chooses the spoken response.
+That initial result is automatically incorporated by xAI's voice agent. Each later user-facing status transition is also appended to `hermes_operation_events`. While the call remains active, the installation-authenticated iOS client reads only its own voice session's cursor-based feed and inserts each event into xAI with `conversation.item.create`. Nonterminal events update conversation context without forcing speech. A terminal result requests a new Grok response only after the current response has ended and the user is not speaking. Grok therefore receives a two-minute result just as automatically as a two-second result and does not need to poll Hermes itself.
 
 ### 4.6 Hangup
 
@@ -248,19 +248,19 @@ Ending the call:
 ```json
 {
   "request": "A complete standalone request for Hermes",
-  "session_mode": "active | new | continue",
-  "session_id": "required only for continue"
+  "context_scope": "origin | independent",
+  "independent_context": "required only for independent"
 }
 ```
 
 Rules:
 
 - `request` must be non-empty, bounded, and standalone.
-- `active` uses the call's active lineage and fails if none exists.
-- `new` creates a new Hermes session, makes its lineage active after durable acceptance, and returns its current raw ID.
-- `continue` requires an explicit session ID and fails closed if it is unknown or inaccessible.
+- `origin` uses only the signed session that placed the call and fails if none exists.
+- `independent` creates an isolated Hermes context for an unrelated topic or task.
+- Reusing one `independent_context` key continues only that independent task; another key creates another isolated context.
 - Unknown arguments are rejected.
-- The Worker never fabricates or silently redirects a session ID.
+- The Worker never exposes, fabricates, or asks Grok or the user to choose Hermes session IDs.
 
 Possible output:
 
@@ -268,15 +268,14 @@ Possible output:
 {
   "status": "answered | working | needs_external_approval | failed | outcome_unknown",
   "operation_id": "voiceop_...",
-  "hermes_session_id": "current canonical raw ID",
   "answer": "present when answered",
   "summary": "present when work continues",
-  "completion_delivery": "automatic | manual_fallback",
+  "completion_delivery": "caller_events",
   "user_action": "present when an authenticated non-MCP confirmation is required"
 }
 ```
 
-`ask_hermes` durably accepts the operation, starts one Workflow instance, and keeps the Remote MCP request open for a configurable 45-second completion window. xAI automatically injects the returned terminal MCP result into Grok. Only unusually long work returns `completion_delivery: manual_fallback`; no second Hermes turn is launched merely to improve latency.
+`ask_hermes` durably accepts the operation, starts one Workflow instance, and returns `queued` without waiting for Hermes. Caller owns later delivery through the call-scoped event feed. The initial MCP response and every later event refer to the same operation; no second Hermes turn is launched merely to improve latency.
 
 ### 5.2 `check_hermes_task`
 
@@ -286,7 +285,7 @@ Possible output:
 }
 ```
 
-Only operation IDs explicitly granted to the current call token may be read. A later call receives individual pending/completed operation grants during bootstrap; it does not inherit access to every operation owned by the installation. The tool returns the same status envelope as `ask_hermes`.
+Only operation IDs explicitly granted to the current call token may be read. A later call receives individual pending/completed operation grants during bootstrap; it does not inherit access to every operation owned by the installation. The tool returns the same status envelope as `ask_hermes`, but Grok uses it only for a user-requested status check or a reported event-delivery failure.
 
 ### 5.3 Human approval boundary
 
@@ -367,8 +366,10 @@ For each `tools/call`, the MCP handler derives a replay key from the call scope,
 
 xAI publishes no guaranteed Remote MCP tool timeout. The production contract therefore does not depend on a guessed two-second window:
 
-- `ask_hermes` durably creates one logical operation, schedules its deterministic Workflow, and waits up to 45 seconds for that same operation to become terminal so xAI automatically injects the final MCP result into Grok.
-- Grok calls `check_hermes_task` only after the explicit `manual_fallback` result or when the user asks for an interim status.
+- `ask_hermes` durably creates one logical operation, schedules its deterministic Workflow, and returns `queued` immediately.
+- The coordinator appends each status transition to a D1 event log keyed by installation, voice session, and monotonic cursor.
+- The iOS call client reads that scoped feed and inserts status envelopes into the active xAI conversation. Terminal events request speech only when no response or user speech is active.
+- Grok calls `check_hermes_task` only when the user asks for a status check or Caller reports that event delivery is unavailable.
 - Accepted orchestration continues durably through a Cloudflare Workflow; the underlying Hermes turn has the restart and ambiguous-outcome limits stated above.
 - A P0 characterization harness exposes authenticated 1/2/5/10/30-second no-op MCP probes in staging only. Those measurements tune, but never become, a correctness dependency.
 - If completion occurs after hangup, the coordinator writes an outbox item and the existing scheduler creates a follow-up Caller/APNs call. The follow-up call is separately authenticated and bootstrapped with a grant for that exact operation ID.
@@ -444,6 +445,15 @@ This is an internal raw-ID rotation map, not a user-facing naming feature.
 - `workflow_pending | queued | submitting | running | completed | failed | cancelled_before_start | needs_external_approval | outcome_unknown`
 - structured result
 - timestamps
+
+### `hermes_operation_events`
+
+- monotonic cursor
+- operation, installation, and voice-session ownership
+- one user-facing status transition and its structured result snapshot
+- creation timestamp
+
+This append-only table prevents the phone from missing fast transitions between polls. Its HTTPS reader requires the installation secret, verifies the exact active voice session, returns at most 100 ordered events after a cursor, and never exposes Hermes session IDs.
 
 ### `completion_outbox`
 
@@ -667,7 +677,7 @@ Deployment order is: deploy code with dormant feature flag and new bindings, app
 ## 14. Acceptance Criteria
 
 - xAI can initialize the deployed Remote MCP server and discover only `ask_hermes` and `check_hermes_task`.
-- `ask_hermes(new)` automatically returns the terminal Hermes answer for ordinary work, or an explicit durable `manual_fallback` operation when it exceeds the bounded wait.
+- `ask_hermes(new)` returns `queued` immediately, and Caller automatically inserts subsequent status transitions and the terminal Hermes answer into the active Grok conversation.
 - `ask_hermes(continue, returned_id)` reaches the same Hermes lineage.
 - Compression-ID rotation is resolved before and after work and the current ID is returned.
 - Two Caller-originated same-lineage operations preserve FIFO ordering; two different lineages may proceed concurrently. No global cross-client lock is claimed.
@@ -697,7 +707,7 @@ The reviewer must explicitly verify:
 4. Does durable `continue_session` preserve native tool context and expose a trustworthy pause-before-tool approval boundary and reconciliation state?
 5. Does a Workflow plus one installation coordinator preserve Caller-channel ordering across Cloudflare restarts and session-ID rotation without overstating global Hermes serialization?
 6. Is any separate AWS application still necessary?
-7. Does the 45-second bounded Remote MCP wait automatically deliver ordinary terminal results while preserving an explicit durable fallback for longer work?
+7. Does the call-scoped event feed deliver both fast and long-running terminal results without Grok polling, while preventing response overlap and cross-session reads?
 8. Can the current iOS xAI WebSocket implementation be built using native APIs without adding an unnecessary audio proxy?
 9. Are there security or App Store concerns that change the planned CallKit/bootstrap boundary?
 10. Which recommendations are blockers before implementation versus later hardening?
@@ -712,13 +722,15 @@ The independent reviewer completed four revise cycles. The final verdict was **A
 
 The implementation is live with this boundary:
 
-- Caller Worker: `https://agentcall-relay.chiragmgg.workers.dev`, deployed version `98590339-7ebd-4815-8495-21621863bc90`.
+- Caller Worker: `https://agentcall-relay.chiragmgg.workers.dev`, deployed version `2ff4638c-28bd-46b0-aff6-1dc4cc12af2f`.
 - Private path: a Workers VPC Service targets the existing healthy Cloudflare tunnel at Hermes `127.0.0.1:8642`; no public Hermes port or separate AWS bridge application was added.
 - Hermes: upgraded to `0.19.1`, durable run capabilities enabled, and voice requests restricted to the server-configured `web` and `session_search` toolsets.
 - Remote MCP: production discovery returns exactly `ask_hermes` and `check_hermes_task`.
-- Production smoke: the Worker minted an xAI ephemeral token, initialized MCP, created a disposable Hermes session, and `ask_hermes` returned the exact terminal answer `CALLER_MCP_LIVE_OK` with `completion_delivery: automatic` in one MCP call.
-- Worker verification: 17 Node unit tests and five Worker-runtime tests pass; type checking, dry deploy, and startup validation pass.
+- Production smoke: the Worker minted an xAI ephemeral token, initialized MCP, accepted the operation immediately with `completion_delivery: caller_events`, observed `queued → running → answered` through the call-scoped event feed, and returned the exact Hermes answer `CALLER_MCP_LIVE_OK`.
+- Worker verification: 14 Node unit tests and five Worker-runtime tests pass; generated types, TypeScript checking, dry deploy, and startup validation pass.
 - Hermes verification: 31 focused durable/API/tool-policy tests and six serialized-configuration tests pass locally against the deployed code lineage. A broader relevant suite passed 173 tests; one pre-existing readiness expectation remains unrelated to this feature.
-- iOS verification: all 38 simulator tests pass. A signed Debug device build was installed and launched on Aeon. This proves build, signing, installation, and launch; the separate user-heard call verifies the real audio path.
+- iOS verification: all 41 simulator tests pass, including authenticated cursor construction, event-output escaping, and response-overlap gating. A signed Debug device build was installed, launched, and observed running on Aeon.
+- Live event-path verification: call `005ebac4-e4ec-4bd7-b8e3-56c4dde15459` created one Hermes operation with durable `queued → running → answered` events. Cloudflare live logs then showed the Aeon app repeatedly reading the authenticated feed at cursor `after=6`, proving that the physical client consumed through the terminal event. Whether the exact terminal wording was heard remains a separate human observation.
+- Managed agent package: signed compatible release `0.4.3` is installed on the primary Hermes VPS, verifies current, retains the prior rollback, and has one flock-guarded daily updater entry at 03:37 UTC.
 
 The final acceptance action is therefore intentionally human: answer one live call on Aeon, grant microphone permission if prompted, interrupt Grok once, and ask it to consult Hermes. That test characterizes real audio, barge-in behavior, and xAI's server-side MCP latency; those properties cannot be truthfully proven by the automated MCP smoke.

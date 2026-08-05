@@ -7,7 +7,7 @@ import sys
 import urllib.error
 import urllib.request
 
-SKILL_VERSION = "0.4.2"
+SKILL_VERSION = "0.4.3"
 USER_AGENT = f"AgentCall-Hermes/{SKILL_VERSION}"
 
 

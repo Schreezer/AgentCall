@@ -50,7 +50,7 @@ describe("Cloudflare relay", () => {
     expect(manifest.status).toBe(200);
     expect(manifest.body.manifest).toMatchObject({
       skill_name: "urgent-caller",
-      skill_version: "0.4.2",
+      skill_version: "0.4.3",
       requires_user_approval: false,
     });
     const bootstrap = await exports.default.fetch(
@@ -59,7 +59,7 @@ describe("Cloudflare relay", () => {
     expect(bootstrap.status).toBe(200);
     expect(await bootstrap.text()).toContain("Bootstrap the signed urgent-caller skill");
     const skillFile = await exports.default.fetch(
-      "https://relay.test/v1/agent-package/urgent-caller/files/0.4.2/SKILL.md",
+      "https://relay.test/v1/agent-package/urgent-caller/files/0.4.3/SKILL.md",
       { headers: { authorization: `Bearer ${pairing.body.agent_token}` } },
     );
     expect(skillFile.status).toBe(200);
@@ -218,14 +218,15 @@ describe("Cloudflare relay", () => {
     const callID = crypto.randomUUID();
     const voiceSessionID = crypto.randomUUID();
     const token = "mcp_test_token_123456789";
+    const installationSecret = "installation_test_secret_123456789";
     const operationID = `voiceop_${"a".repeat(32)}`;
     const now = Date.now();
     await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO installations
           (id, installation_secret_hash, device_token, environment, created_at, updated_at)
-         VALUES (?1, 'hash', ?2, 'sandbox', ?3, ?3)`,
-      ).bind(installationID, "ab".repeat(32), now),
+         VALUES (?1, ?2, ?3, 'sandbox', ?4, ?4)`,
+      ).bind(installationID, await hashCredential(installationSecret), "ab".repeat(32), now),
       env.DB.prepare(
         `INSERT INTO calls
           (id, installation_id, caller_name, message, scheduled_at, status, idempotency_key,
@@ -285,7 +286,7 @@ describe("Cloudflare relay", () => {
     ]);
     const askHermes = listed.body.result.tools.find((tool) => tool.name === "ask_hermes");
     expect(askHermes.description).toContain("explicit context boundary");
-    expect(askHermes.description).toContain("returns its final result automatically");
+    expect(askHermes.description).toContain("returns queued immediately");
     expect(askHermes.inputSchema.required).toEqual(["request", "context_scope"]);
     expect(Object.keys(askHermes.inputSchema.properties)).toEqual([
       "request",
@@ -303,9 +304,50 @@ describe("Cloudflare relay", () => {
     }, token);
     expect(origin.body.result.structuredContent).toMatchObject({
       status: "queued",
-      completion_delivery: "manual_fallback",
+      completion_delivery: "caller_events",
     });
     expect(origin.body.result.structuredContent).not.toHaveProperty("hermes_session_id");
+
+    const unauthorizedEvents = await requestJSON(
+      `/v1/installations/${installationID}/voice-sessions/${voiceSessionID}/hermes-events`,
+    );
+    expect(unauthorizedEvents.status).toBe(401);
+    const invalidCursor = await requestJSON(
+      `/v1/installations/${installationID}/voice-sessions/${voiceSessionID}/hermes-events?after=-1`,
+      { token: installationSecret },
+    );
+    expect(invalidCursor.status).toBe(400);
+
+    const originOperationID = origin.body.result.structuredContent.operation_id;
+    await coordinator.updateOperation(originOperationID, {
+      status: "running",
+      hermesRunID: "run-test",
+    });
+    const runningEvents = await requestJSON(
+      `/v1/installations/${installationID}/voice-sessions/${voiceSessionID}/hermes-events?after=0`,
+      { token: installationSecret },
+    );
+    expect(runningEvents.status).toBe(200);
+    expect(runningEvents.body.events.filter((event) => event.operation_id === originOperationID))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ status: "queued" }),
+        expect.objectContaining({ status: "running" }),
+      ]));
+    await coordinator.updateOperation(originOperationID, {
+      status: "answered",
+      result: { answer: "The automatically delivered result" },
+    });
+    const completedEvents = await requestJSON(
+      `/v1/installations/${installationID}/voice-sessions/${voiceSessionID}/hermes-events?after=${runningEvents.body.next_cursor}`,
+      { token: installationSecret },
+    );
+    expect(completedEvents.body.events).toEqual([
+      expect.objectContaining({
+        operation_id: originOperationID,
+        status: "answered",
+        answer: "The automatically delivered result",
+      }),
+    ]);
 
     const independentFirst = await mcpRequest({
       id: 5,
@@ -433,7 +475,7 @@ describe("Cloudflare relay", () => {
     });
     expect(bootstrap.body.session.instructions).toContain("A decision is due");
     expect(bootstrap.body.session.instructions).toContain("context_scope independent");
-    expect(bootstrap.body.session.instructions).toContain("injected into this conversation automatically");
+    expect(bootstrap.body.session.instructions).toContain("Caller then adds trusted caller_hermes_event messages");
     expect(bootstrap.body.session.instructions).toContain("unrelated work never shares a Hermes session");
     expect(JSON.stringify(bootstrap.body)).not.toContain("XAI_API_KEY");
   });

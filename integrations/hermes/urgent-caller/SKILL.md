@@ -58,7 +58,7 @@ python3 scripts/call.py \
   --idempotency-key "flight-decision-2026-08-02"
 ```
 
-Hermes supplies `HERMES_SESSION_ID` to the skill process; never invent, summarize, or expose it. The relay stores the full briefing but sends only the short `--message`, call ID, caller name, and mode through PushKit. After answer, Grok speaks the briefing and may call `ask_hermes`; Caller keeps ordinary work open until its terminal result is injected back into Grok automatically. `check_hermes_task` is only for an explicit long-running fallback or a user-requested interim status. Grok owns the wording; do not script a forced reply.
+Hermes supplies `HERMES_SESSION_ID` to the skill process; never invent, summarize, or expose it. The relay stores the full briefing but sends only the short `--message`, call ID, caller name, and mode through PushKit. After answer, Grok speaks the briefing and may call `ask_hermes`, which acknowledges `queued` immediately. Caller then delivers later status transitions and the terminal result into the active Grok conversation automatically, even when Hermes takes longer than the original tool call. `check_hermes_task` is only for a user-requested status check or reported event-delivery failure. Grok owns the wording; do not script a forced reply.
 
 The message remains a deliberately short fallback if live bootstrap or xAI audio fails. The four structured briefing fields are mandatory. Put only the minimum facts necessary for the opening conversation in them; Grok can ask Hermes for deeper context through the signed originating session.
 

@@ -167,6 +167,20 @@ async function route(request, env, context) {
     return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
   }
 
+  const hermesEventsMatch = url.pathname.match(
+    /^\/v1\/installations\/([0-9a-f-]+)\/voice-sessions\/([0-9a-f-]+)\/hermes-events$/i,
+  );
+  if (request.method === "GET" && hermesEventsMatch) {
+    const installation = await authorizeInstallation(env, hermesEventsMatch[1], bearerToken(request));
+    if (!installation) return json(401, { error: "invalid_installation_credential" });
+    return listHermesOperationEvents(
+      env,
+      installation.id,
+      hermesEventsMatch[2].toLowerCase(),
+      url.searchParams.get("after"),
+    );
+  }
+
   const approvalMatch = url.pathname.match(
     /^\/v1\/installations\/([0-9a-f-]+)\/hermes-operations\/(voiceop_[0-9a-f]{32})\/approval$/i,
   );
@@ -591,6 +605,45 @@ async function deleteInstallation(env, installationID) {
   ]);
 }
 
+async function listHermesOperationEvents(env, installationID, voiceSessionID, afterValue) {
+  const after = afterValue === null ? 0 : Number(afterValue);
+  if (!Number.isSafeInteger(after) || after < 0) {
+    return json(400, { error: "invalid_event_cursor" });
+  }
+  const voiceSession = await env.DB.prepare(
+    `SELECT id FROM voice_sessions
+      WHERE id = ?1 AND installation_id = ?2
+        AND revoked_at IS NULL AND expires_at > ?3`,
+  ).bind(voiceSessionID, installationID, Date.now()).first();
+  if (!voiceSession) return json(404, { error: "voice_session_not_available" });
+
+  const rows = await env.DB.prepare(
+    `SELECT id, operation_id, status, result_json, created_at
+       FROM hermes_operation_events
+      WHERE installation_id = ?1 AND voice_session_id = ?2 AND id > ?3
+      ORDER BY id ASC LIMIT 100`,
+  ).bind(installationID, voiceSessionID, after).all();
+  const events = rows.results.map((row) => {
+    const result = parseJSON(row.result_json, {}) ?? {};
+    return {
+      cursor: row.id,
+      operation_id: row.operation_id,
+      status: row.status,
+      ...(result.answer ? { answer: result.answer } : {}),
+      ...(result.summary ? { summary: result.summary } : {}),
+      ...(result.error ? { error: result.error } : {}),
+      ...(row.status === "needs_external_approval"
+        ? { user_action: "Confirm or deny the pending action in the Caller app." }
+        : {}),
+      created_at: new Date(row.created_at).toISOString(),
+    };
+  });
+  return json(200, {
+    events,
+    next_cursor: events.at(-1)?.cursor ?? after,
+  }, { "cache-control": "no-store" });
+}
+
 async function getHermesApproval(env, installationID, operationID) {
   const approval = await env.DB.prepare(
     `SELECT operation_id, notification_id, details_json, choices_json, status, created_at, expires_at
@@ -719,9 +772,13 @@ async function notifyScheduler(env, installationID, operation) {
 }
 
 async function runMaintenance(env) {
-  await env.DB.prepare("DELETE FROM rate_limits WHERE window_start < ?1")
-    .bind(Date.now() - 5 * 60_000)
-    .run();
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM rate_limits WHERE window_start < ?1")
+      .bind(now - 5 * 60_000),
+    env.DB.prepare("DELETE FROM voice_sessions WHERE expires_at < ?1")
+      .bind(now - 7 * 24 * 60 * 60_000),
+  ]);
   const candidates = await env.DB.prepare(
     `SELECT DISTINCT installation_id
        FROM (
@@ -735,7 +792,7 @@ async function runMaintenance(env) {
        )
       LIMIT 500`,
   )
-    .bind(Date.now())
+    .bind(now)
     .all();
   await Promise.all(
     candidates.results.map((row) =>

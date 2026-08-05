@@ -35,7 +35,6 @@ export default defineConfig({
           APNS_PRIVATE_KEY: process.env.APNS_PRIVATE_KEY,
           XAI_API_KEY: "test-xai-key",
           LIVE_VOICE_ENABLED: "true",
-          HERMES_MCP_WAIT_MS: "0",
         },
       },
     })),

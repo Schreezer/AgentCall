@@ -78,7 +78,7 @@ export class HermesInstallationCoordinator extends DurableObject {
       [`operation:${id}`]: operation,
       [replayKey]: { operationID: id, requestHash: input.requestHash },
     });
-    await this.project(operation);
+    await this.project(operation, false);
     await this.ensureWorkflow(operation);
     return this.publicOperation(await this.ctx.storage.get(`operation:${id}`));
   }
@@ -134,9 +134,10 @@ export class HermesInstallationCoordinator extends DurableObject {
     const current = await this.ctx.storage.get(key);
     if (!current) throw new Error("hermes_operation_not_found");
     const updated = { ...current, ...fields, updatedAt: Date.now() };
+    const statusChanged = current.status !== updated.status;
     await this.ctx.storage.put(key, updated);
     if (updated.hermesSessionID) await this.registerAllowedSession(updated.hermesSessionID, "resolved");
-    await this.project(updated);
+    await this.project(updated, statusChanged);
     return updated;
   }
 
@@ -167,8 +168,8 @@ export class HermesInstallationCoordinator extends DurableObject {
     return this.publicOperation(operation);
   }
 
-  async project(operation) {
-    await this.env.DB.prepare(
+  async project(operation, emitStatusEvent = false) {
+    const projection = this.env.DB.prepare(
       `INSERT INTO hermes_operations
         (id, installation_id, call_id, voice_session_id, lineage_id, workflow_id,
          replay_key, request_hash, status, hermes_session_id, hermes_run_id,
@@ -196,15 +197,33 @@ export class HermesInstallationCoordinator extends DurableObject {
         operation.result ? JSON.stringify(operation.result) : null,
         operation.createdAt,
         operation.updatedAt,
-      )
-      .run();
+      );
+    if (!emitStatusEvent) {
+      await projection.run();
+      return;
+    }
+    await this.env.DB.batch([
+      projection,
+      this.env.DB.prepare(
+        `INSERT INTO hermes_operation_events
+          (operation_id, installation_id, voice_session_id, status, result_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+      ).bind(
+        operation.id,
+        operation.installationID,
+        operation.voiceSessionID,
+        operation.status,
+        operation.result ? JSON.stringify(operation.result) : null,
+        operation.updatedAt,
+      ),
+    ]);
   }
 
   /** @param {any} operation */
   publicOperation(operation) {
     if (!operation) throw new Error("hermes_operation_not_found");
     return {
-      status: operation.status,
+      status: operation.status === "workflow_pending" ? "queued" : operation.status,
       operation_id: operation.id,
       ...(operation.result?.answer ? { answer: operation.result.answer } : {}),
       ...(operation.result?.summary ? { summary: operation.result.summary } : {}),

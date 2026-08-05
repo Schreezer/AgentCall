@@ -10,16 +10,19 @@ final class GrokVoiceSession {
     private var bootstrapClient: VoiceBootstrapClient?
     private var bootstrapTask: Task<Void, Never>?
     private var receiveTask: Task<Void, Never>?
+    private var operationEventsTask: Task<Void, Never>?
     private var socket: URLSessionWebSocketTask?
     private var urlSession: URLSession?
     private var socketDelegate: GrokSocketDelegate?
     private var voiceSessionID: String?
     private var activeCallID: UUID?
     private var stopped = false
+    private var responseGate = GrokResponseGate()
 
     func start(callID: UUID, client: VoiceBootstrapClient) {
         stop(revoke: false)
         stopped = false
+        responseGate = GrokResponseGate()
         activeCallID = callID
         bootstrapClient = client
         bootstrapTask = Task { [weak self] in
@@ -44,6 +47,8 @@ final class GrokVoiceSession {
         bootstrapTask = nil
         receiveTask?.cancel()
         receiveTask = nil
+        operationEventsTask?.cancel()
+        operationEventsTask = nil
         audio.stop()
         socket?.cancel(with: .normalClosure, reason: nil)
         socket = nil
@@ -93,6 +98,7 @@ final class GrokVoiceSession {
             try audio.start { [weak self] data in
                 Task { @MainActor in self?.socket?.send(.data(data)) { _ in } }
             }
+            startHermesEventLoop()
         } catch {
             fail(error)
         }
@@ -125,12 +131,17 @@ final class GrokVoiceSession {
               let type = event["type"] as? String else { return }
         switch type {
         case "session.updated":
-            try? sendJSON([
-                "type": "response.create",
-                "response": ["modalities": ["text", "audio"]],
-            ])
+            requestResponse()
+        case "response.created":
+            responseGate.responseCreated()
+        case "response.done":
+            responseGate.responseDone()
+            requestPendingHermesResponseIfPossible()
         case "input_audio_buffer.speech_started":
+            responseGate.userSpeechStarted()
             audio.interruptPlayback()
+        case "input_audio_buffer.speech_stopped":
+            responseGate.userSpeechStopped()
         case "ping":
             if let timestamp = event["ping_timestamp"] {
                 try? sendJSON(["type": "pong", "ping_timestamp": timestamp])
@@ -140,6 +151,87 @@ final class GrokVoiceSession {
             fail(NSError(domain: "XAIRealtime", code: 1, userInfo: [NSLocalizedDescriptionKey: message]))
         default:
             break
+        }
+    }
+
+    private func startHermesEventLoop() {
+        operationEventsTask?.cancel()
+        guard let bootstrapClient, let voiceSessionID else { return }
+        operationEventsTask = Task { [weak self] in
+            var cursor = 0
+            var retryDelayNanoseconds: UInt64 = 750_000_000
+            while !Task.isCancelled {
+                do {
+                    let page = try await bootstrapClient.hermesEvents(
+                        voiceSessionID: voiceSessionID,
+                        after: cursor
+                    )
+                    try Task.checkCancellation()
+                    guard let self, !self.stopped else { return }
+                    for event in page.events {
+                        cursor = max(cursor, event.cursor)
+                        if event.status != "queued" { self.injectHermesEvent(event) }
+                    }
+                    cursor = max(cursor, page.nextCursor)
+                    retryDelayNanoseconds = 750_000_000
+                    try await Task.sleep(nanoseconds: 750_000_000)
+                } catch is CancellationError {
+                    return
+                } catch VoiceBootstrapError.rejected(let status) where status == 404 || status == 410 {
+                    return
+                } catch {
+                    guard let self, !self.stopped else { return }
+                    self.logger.warning(
+                        "Hermes event polling failed; retrying: \(error.localizedDescription, privacy: .public)"
+                    )
+                    try? await Task.sleep(nanoseconds: retryDelayNanoseconds)
+                    retryDelayNanoseconds = min(retryDelayNanoseconds * 2, 5_000_000_000)
+                }
+            }
+        }
+    }
+
+    private func injectHermesEvent(_ event: HermesOperationEvent) {
+        do {
+            try sendJSON([
+                "type": "conversation.item.create",
+                "item": [
+                    "type": "message",
+                    "role": "user",
+                    "content": [[
+                        "type": "input_text",
+                        "text": try event.conversationEnvelope(),
+                    ]],
+                ],
+            ])
+            if event.shouldPromptResponse {
+                responseGate.hermesCompletionArrived()
+                requestPendingHermesResponseIfPossible()
+            }
+        } catch {
+            fail(error)
+        }
+    }
+
+    private func requestPendingHermesResponseIfPossible() {
+        guard responseGate.consumeHermesResponseRequestIfPossible() else { return }
+        sendResponseCreate()
+    }
+
+    private func requestResponse() {
+        guard responseGate.consumeOrdinaryResponseRequestIfPossible() else { return }
+        sendResponseCreate()
+    }
+
+    private func sendResponseCreate() {
+        do {
+            try sendJSON([
+                "type": "response.create",
+                "response": ["modalities": ["text", "audio"]],
+            ])
+        } catch {
+            responseGate.responseRequestFailed()
+            fail(error)
         }
     }
 
@@ -159,6 +251,65 @@ final class GrokVoiceSession {
         logger.error("Live voice failed: \(error.localizedDescription, privacy: .public)")
         stopped = true
         onFailure?(error)
+    }
+}
+
+struct GrokResponseGate: Equatable {
+    private(set) var responseActive = false
+    private(set) var responseRequested = false
+    private(set) var userSpeaking = false
+    private(set) var hermesResponsePending = false
+    private(set) var automaticResponseExpected = false
+
+    mutating func responseCreated() {
+        if automaticResponseExpected {
+            hermesResponsePending = false
+        }
+        automaticResponseExpected = false
+        responseRequested = false
+        responseActive = true
+    }
+
+    mutating func responseDone() {
+        responseRequested = false
+        responseActive = false
+    }
+
+    mutating func userSpeechStarted() {
+        userSpeaking = true
+        automaticResponseExpected = false
+    }
+
+    mutating func userSpeechStopped() {
+        userSpeaking = false
+        automaticResponseExpected = true
+    }
+
+    mutating func hermesCompletionArrived() {
+        hermesResponsePending = true
+    }
+
+    mutating func consumeOrdinaryResponseRequestIfPossible() -> Bool {
+        guard !responseActive, !responseRequested else { return false }
+        responseRequested = true
+        return true
+    }
+
+    mutating func consumeHermesResponseRequestIfPossible() -> Bool {
+        guard hermesResponsePending,
+              !responseActive,
+              !responseRequested,
+              !userSpeaking,
+              !automaticResponseExpected else {
+            return false
+        }
+        hermesResponsePending = false
+        responseRequested = true
+        return true
+    }
+
+    mutating func responseRequestFailed() {
+        responseRequested = false
     }
 }
 

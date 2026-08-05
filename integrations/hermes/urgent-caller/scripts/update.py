@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 
 SKILL_NAME = "urgent-caller"
-CURRENT_VERSION = "0.4.2"
+CURRENT_VERSION = "0.4.3"
 USER_AGENT = f"AgentCall-Hermes/{CURRENT_VERSION}"
 TRUSTED_RELEASE_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA0PXJ6vcqM8/U55Og/X1tPEq4zJk2WwYfiGbeGNTGW9g=

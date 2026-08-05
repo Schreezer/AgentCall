@@ -103,8 +103,9 @@ The `cloudflare` implementation preserves the same HTTP API while replacing loca
 - Worker secrets hold the APNs Team ID, Key ID, and `.p8` signing key.
 - A second Durable Object plus a Workflow coordinate session-scoped Hermes operations.
 - `/mcp` exposes only `ask_hermes` and `check_hermes_task` to xAI. `ask_hermes`
-  keeps ordinary work open until a terminal result so xAI injects the answer
-  back into Grok automatically; explicit checking is only the bounded fallback.
+  returns `queued` immediately. Each later status transition is appended to D1; the authenticated
+  iOS call session reads that feed and inserts the status or final answer into the active Grok
+  conversation automatically. Explicit checking is only for user-requested diagnostics.
 - A Workers VPC Service reaches the existing Hermes API without publishing port 8642.
 
 Create the resources:
@@ -246,6 +247,7 @@ Audio is limited to 5 MB by default and expires after one hour. For a future cal
 | `GET` | `/v1/agent-package/urgent-caller/bootstrap.py` | Fetch the app-hash-pinned installer |
 | `GET` | `/v1/agent-package/urgent-caller/manifest` | Fetch the authenticated signed skill manifest |
 | `GET` | `/v1/agent-package/urgent-caller/files/:version/:path` | Fetch a manifest-hashed release file |
+| `GET` | `/v1/installations/:id/voice-sessions/:id/hermes-events?after=:cursor` | Read ordered Hermes status changes for one active call |
 | `POST` | `/v1/audio` | Upload a short-lived audio attachment |
 | `POST` | `/v1/calls` | Place or schedule a call |
 | `GET` | `/v1/calls/:id` | Read relay delivery status |

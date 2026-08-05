@@ -65,37 +65,43 @@ try {
       independent_context: "caller-production-smoke",
     },
   });
-  let operation = toolPayload(accepted);
+  const operation = toolPayload(accepted);
   if (!operation.operation_id) throw new Error(`ask_hermes_not_accepted:${JSON.stringify(operation)}`);
+  if (operation.status !== "queued" || operation.completion_delivery !== "caller_events") {
+    throw new Error(`ask_hermes_delivery_contract_failed:${JSON.stringify(operation)}`);
+  }
 
   const deadline = Date.now() + 180_000;
-  let requestID = 10;
-  while (!terminalStatuses.has(operation.status) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-    const checked = await mcpRequest(mcpAuthorization, requestID++, "tools/call", {
-      name: "check_hermes_task",
-      arguments: { operation_id: operation.operation_id },
-    });
-    operation = toolPayload(checked);
+  let cursor = 0;
+  let terminalEvent;
+  const observedStatuses = [];
+  while (!terminalEvent && Date.now() < deadline) {
+    const page = await jsonRequest(
+      `/v1/installations/${installation.installation_id}/voice-sessions/${voiceSessionID}/hermes-events?after=${cursor}`,
+      { token: installation.installation_secret },
+    );
+    cursor = page.next_cursor;
+    for (const event of page.events.filter((item) => item.operation_id === operation.operation_id)) {
+      observedStatuses.push(event.status);
+      if (terminalStatuses.has(event.status)) terminalEvent = event;
+    }
+    if (!terminalEvent) await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
-  if (operation.status !== "answered") {
-    throw new Error(`hermes_operation_${operation.status || "timed_out"}:${operation.error || ""}`);
+  if (terminalEvent?.status !== "answered") {
+    throw new Error(`hermes_operation_${terminalEvent?.status || "timed_out"}:${terminalEvent?.error || ""}`);
   }
-  if (operation.completion_delivery !== "automatic") {
-    throw new Error(`hermes_completion_not_automatic:${operation.completion_delivery || "missing"}`);
-  }
-  if (!String(operation.answer || "").includes("CALLER_MCP_LIVE_OK")) {
-    throw new Error(`unexpected_hermes_answer:${operation.answer || "missing"}`);
+  if (!String(terminalEvent.answer || "").includes("CALLER_MCP_LIVE_OK")) {
+    throw new Error(`unexpected_hermes_answer:${terminalEvent.answer || "missing"}`);
   }
   console.log(JSON.stringify({
     ok: true,
     worker: "reachable",
     xai_ephemeral_token: "minted",
     mcp_tools: toolNames,
-    hermes_status: operation.status,
+    hermes_status: terminalEvent.status,
+    hermes_event_statuses: observedStatuses,
     completion_delivery: operation.completion_delivery,
     hermes_answer: "CALLER_MCP_LIVE_OK",
-    hermes_session_id: operation.hermes_session_id,
   }));
 } finally {
   if (installation?.installation_id && installation?.installation_secret) {

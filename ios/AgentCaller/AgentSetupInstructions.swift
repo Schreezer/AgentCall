@@ -39,9 +39,10 @@ enum AgentSetupInstructions {
           `--desired-outcome`, and `--urgency` fields. Preserve the active `HERMES_SESSION_ID`;
           never invent, summarize, print, or expose it.
         - Grok receives fresh voice instructions from Caller when the user answers and can consult the
-          signed originating Hermes session through Remote MCP `ask_hermes`. Caller automatically
-          returns ordinary terminal results to Grok; use `check_hermes_task` only for the explicit
-          long-running fallback or a user-requested interim status.
+          signed originating Hermes session through Remote MCP `ask_hermes`. The tool acknowledges
+          `queued` immediately; Caller then inserts later statuses and the terminal result into the
+          active Grok conversation automatically. Use `check_hermes_task` only for a user-requested
+          status check or a reported event-delivery failure.
         - Approval requests appear in the Caller app so the user can explicitly approve or deny
           consequential Hermes actions.
         - Ordinary reminders stay in chat. Place a call only when I explicitly request it or an

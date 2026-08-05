@@ -2,7 +2,6 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { bearerToken, hashCredential } from "./core.js";
-import { awaitHermesOperation, configuredHermesWaitMs } from "./hermes-operation-wait.js";
 
 export async function handleMcp(request, env, context) {
   const scope = await authorizeMcp(request, env);
@@ -29,8 +28,9 @@ function createHermesMcpServer(env, scope, requestID) {
         "the reason for this call; use independent for a different topic or task. Reuse the same " +
         "independent_context key for follow-ups to one independent task, and use a new key for another task. " +
         "Never ask the user to choose among Hermes sessions or mention internal sessions. " +
-        "This call normally waits for Hermes and returns its final result automatically. Use check_hermes_task " +
-        "only if completion_delivery is manual_fallback or the user explicitly asks for an interim status.",
+        "This call returns queued immediately. Caller then delivers later status changes and the final result " +
+        "to this conversation automatically. Do not call check_hermes_task unless the user explicitly asks " +
+        "for a status check or Caller reports that automatic event delivery is unavailable.",
       inputSchema: {
         request: z.string().trim().min(1).max(8_000).describe("A complete standalone request for Hermes."),
         context_scope: z.enum(["origin", "independent"]).describe(
@@ -67,12 +67,7 @@ function createHermesMcpServer(env, scope, requestID) {
           activeHermesSessionID: scope.origin_hermes_session_id,
           enabledToolsets: configuredVoiceToolsets(env),
         });
-        const result = await awaitHermesOperation(
-          coordinator,
-          accepted,
-          configuredHermesWaitMs(env.HERMES_MCP_WAIT_MS),
-        );
-        return toolResult(result);
+        return toolResult({ ...accepted, completion_delivery: "caller_events" });
       } catch (error) {
         return toolError(error?.message ?? String(error));
       }
