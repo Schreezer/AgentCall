@@ -22,6 +22,7 @@ An App Store build is signed by the Caller developer team. End users cannot safe
 5. Hermes claims the code through `POST /v1/pairings/claim`.
 6. The relay consumes the code and returns a random agent token scoped to that installation.
 7. Hermes stores `CALLER_RELAY_URL` and `CALLER_AGENT_TOKEN` in its supervised environment.
+8. The signed skill verifies Hermes's existing Codex pool and xAI key, then starts one supervised outbound connector. Caller does not receive a provider login or API key.
 
 The relay stores hashes of installation and agent credentials, not their plaintext values.
 
@@ -46,6 +47,8 @@ The relay stores hashes of installation and agent credentials, not their plainte
 - `GET /v1/installations/:id/audio/:audio-id`: download owned audio using the installation secret.
 - `POST /v1/calls`: create a call using `Authorization: Bearer <agent-token>` and `Idempotency-Key`.
 - `GET /v1/calls/:id`: inspect a call owned by the authenticated installation.
+- `GET /v1/agent-connect`: authenticated WebSocket rendezvous for the paired Hermes voice connector.
+- `POST /v1/agent-diagnostics/live-voice`: sanitized connector/provider readiness; never token material.
 
 ## Security properties
 
@@ -83,4 +86,10 @@ The Worker creates APNs provider tokens with Web Crypto and sends through `fetch
 
 ## Audio and live conversation
 
-The MVP supports both on-device text-to-speech and short-lived uploaded speech files. The APNs payload carries only an opaque ID, never the audio bytes. A production relay should move encrypted attachments to object storage with lifecycle deletion. A live agent call should use the VoIP push only to ring; after answer, the app joins a WebRTC session controlled by the user-owned agent service.
+The MVP supports both on-device text-to-speech and short-lived uploaded speech files. The APNs payload carries only an opaque ID, never the audio bytes. A live call uses the VoIP push only to ring.
+
+For live voice, the answered iOS call always creates a WebRTC offer and posts it through the authenticated installation bootstrap. The Worker creates a call-scoped Hermes tool token and asks that installation's `VoiceConnector` Durable Object to start a session. The Durable Object forwards the request through the outbound WebSocket already opened by the paired Hermes host.
+
+For Codex, the connector selects Hermes's `openai-codex` pool entry and supplies its access token and account ID directly to the official local `codex app-server` using experimental `chatgptAuthTokens`. When app-server requests a refresh, the connector forces refresh of that same pool entry through Hermes's cross-process lock. It starts an ephemeral read-only V3 audio thread and returns only the SDP answer. The Worker and iPhone never receive the permanent OAuth access token or refresh token.
+
+For xAI, the connector uses Hermes's local `XAI_API_KEY` to mint a short-lived Realtime client secret and returns only that ephemeral value. Audio then travels directly between iOS and xAI. If both providers are available, Codex is preferred unless the Worker explicitly requests xAI. `LIVE_VOICE_BACKEND=legacy` preserves the older Worker-managed xAI/public broker path as an explicit rollback; it is not an automatic credential fallback.

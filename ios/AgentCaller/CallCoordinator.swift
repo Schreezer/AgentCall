@@ -29,17 +29,37 @@ struct CallAudioRouteOption: Identifiable, Equatable {
     let kind: Kind
 }
 
+enum CallAudioRouteCommand: Equatable {
+    case overrideOutput(AVAudioSession.PortOverride)
+    case selectInput(uid: String)
+}
+
+extension CallAudioRouteOption.Kind {
+    var commands: [CallAudioRouteCommand] {
+        switch self {
+        case .speaker:
+            [.overrideOutput(.speaker)]
+        case .receiver:
+            [.overrideOutput(.none)]
+        case .input(let uid):
+            [.overrideOutput(.none), .selectInput(uid: uid)]
+        }
+    }
+}
+
 @MainActor
 final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
     private let provider: CXProvider
     private let callController = CXCallController()
     private let logger = Logger(subsystem: "com.chirag.agentcaller", category: "CallKit")
     private let speechSynthesizer = AVSpeechSynthesizer()
+    private let connectionTone = ConnectionTone()
     private var audioPlayer: AVAudioPlayer?
     private var audioDownloadTask: Task<Void, Never>?
     private var calls: [UUID: IncomingCall] = [:]
     private var activeCallID: UUID?
-    private var voiceSession: GrokVoiceSession?
+    private var voiceSession: LiveVoiceSession?
+    private var webRTCAudioSessionActivated = false
     weak var configuration: ConnectionConfiguration?
 
     @Published private(set) var activeCall: ActiveCallPresentation?
@@ -74,7 +94,7 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
             if granted {
                 logger.info("Microphone permission granted")
             } else {
-                logger.error("Microphone permission denied; live calls will use the spoken-message fallback")
+                logger.error("Microphone permission denied; live calls will fail closed")
             }
         }
     }
@@ -102,6 +122,9 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
                     print("CALLER_CALLKIT_REPORTED: \(call.id)")
                     #endif
                     self?.logger.info("Incoming call \(call.id, privacy: .public) reported successfully")
+                    if call.mode == .liveVoice {
+                        self?.prepareLiveVoice(for: call)
+                    }
                 }
                 completion?()
             }
@@ -109,6 +132,11 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     func providerDidReset(_ provider: CXProvider) {
+        stopConnectionTone()
+        if webRTCAudioSessionActivated {
+            LiveVoiceSession.audioSessionDidDeactivate(AVAudioSession.sharedInstance())
+            webRTCAudioSessionActivated = false
+        }
         voiceSession?.stop()
         voiceSession = nil
         audioDownloadTask?.cancel()
@@ -127,12 +155,16 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
             return
         }
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(
-                CallAudioRoutePolicy.category,
-                mode: CallAudioRoutePolicy.mode,
-                options: CallAudioRoutePolicy.options
-            )
+            if call.mode == .liveVoice {
+                try LiveVoiceSession.configureAudioSession()
+            } else {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(
+                    CallAudioRoutePolicy.category,
+                    mode: CallAudioRoutePolicy.mode,
+                    options: CallAudioRoutePolicy.options
+                )
+            }
             activeCallID = call.id
             activeCall = ActiveCallPresentation(
                 id: call.id,
@@ -150,6 +182,7 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
+        stopConnectionTone()
         voiceSession?.stop()
         voiceSession = nil
         audioDownloadTask?.cancel()
@@ -179,13 +212,24 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
         refreshAudioRoutes()
         guard let activeCallID, let call = calls[activeCallID] else { return }
         if call.mode == .liveVoice {
-            startLiveVoice(for: call)
+            connectionTone.start()
+            if voiceSession == nil { prepareLiveVoice(for: call) }
+            if !webRTCAudioSessionActivated {
+                LiveVoiceSession.audioSessionDidActivate(audioSession)
+                webRTCAudioSessionActivated = true
+            }
+            voiceSession?.answer()
         } else {
             playAudioOrFallback(for: call)
         }
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+        stopConnectionTone()
+        if webRTCAudioSessionActivated {
+            LiveVoiceSession.audioSessionDidDeactivate(audioSession)
+            webRTCAudioSessionActivated = false
+        }
         voiceSession?.stop()
         voiceSession = nil
         audioDownloadTask?.cancel()
@@ -217,10 +261,10 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
         )
     }
 
-    private func startLiveVoice(for call: IncomingCall) {
+    private func prepareLiveVoice(for call: IncomingCall) {
         guard AVAudioApplication.shared.recordPermission == .granted else {
             logger.error("Live voice unavailable because microphone permission is not granted")
-            playAudioOrFallback(for: call)
+            failLiveCall(call)
             return
         }
         guard let configuration,
@@ -228,18 +272,19 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
               let installationID = configuration.installationID,
               let installationSecret = configuration.installationSecret else {
             logger.error("Live voice unavailable because Caller credentials are missing")
-            playAudioOrFallback(for: call)
+            failLiveCall(call)
             return
         }
-        let voiceSession = GrokVoiceSession()
+        let voiceSession = LiveVoiceSession()
         voiceSession.onFailure = { [weak self] _ in
-            guard let self, self.activeCallID == call.id else { return }
-            self.voiceSession?.stop()
-            self.voiceSession = nil
-            self.playAudioOrFallback(for: call)
+            guard let self else { return }
+            self.failLiveCall(call)
         }
+        voiceSession.onSpeakingPermissionWillSend = { [weak self] in self?.stopConnectionTone() }
+        voiceSession.onReady = { [weak self] in self?.stopConnectionTone() }
+        voiceSession.onRemoteAudioStarted = { [weak self] in self?.stopConnectionTone() }
         self.voiceSession = voiceSession
-        voiceSession.start(
+        voiceSession.prewarm(
             callID: call.id,
             client: VoiceBootstrapClient(
                 relayURL: relayURL,
@@ -247,6 +292,18 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
                 installationSecret: installationSecret
             )
         )
+    }
+
+    private func failLiveCall(_ call: IncomingCall) {
+        stopConnectionTone()
+        voiceSession?.stop()
+        voiceSession = nil
+        calls.removeValue(forKey: call.id)
+        if activeCallID == call.id {
+            activeCallID = nil
+            resetCallPresentation()
+        }
+        provider.reportCall(with: call.id, endedAt: Date(), reason: .failed)
     }
 
     private func playAudioOrFallback(for call: IncomingCall) {
@@ -307,12 +364,17 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
 
     private func finishActiveCall() {
         guard let id = activeCallID else { return }
+        stopConnectionTone()
         voiceSession?.stop()
         voiceSession = nil
         provider.reportCall(with: id, endedAt: Date(), reason: .remoteEnded)
         calls.removeValue(forKey: id)
         activeCallID = nil
         resetCallPresentation()
+    }
+
+    private func stopConnectionTone() {
+        connectionTone.stop()
     }
 
     private func request(_ transaction: CXTransaction, failureMessage: String) {
@@ -325,19 +387,22 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func selectAudioRoute(_ kind: CallAudioRouteOption.Kind) {
-        let session = AVAudioSession.sharedInstance()
         do {
-            switch kind {
-            case .speaker:
-                try session.setPreferredInput(session.availableInputs?.first(where: { $0.portType == .builtInMic }))
-                try session.overrideOutputAudioPort(.speaker)
-            case .receiver:
-                try session.setPreferredInput(session.availableInputs?.first(where: { $0.portType == .builtInMic }))
-                try session.overrideOutputAudioPort(.none)
-            case .input(let uid):
-                guard let input = session.availableInputs?.first(where: { $0.uid == uid }) else { return }
-                try session.overrideOutputAudioPort(.none)
-                try session.setPreferredInput(input)
+            if let voiceSession {
+                try voiceSession.selectAudioRoute(kind)
+                refreshAudioRoutes()
+                return
+            }
+
+            let session = AVAudioSession.sharedInstance()
+            for command in kind.commands {
+                switch command {
+                case .overrideOutput(let override):
+                    try session.overrideOutputAudioPort(override)
+                case .selectInput(let uid):
+                    guard let input = session.availableInputs?.first(where: { $0.uid == uid }) else { return }
+                    try session.setPreferredInput(input)
+                }
             }
             refreshAudioRoutes()
         } catch {

@@ -14,15 +14,17 @@ test("the pinned bootstrap verifies and atomically installs the signed skill", a
       "--relay-url", fixture.baseURL,
       "--env-file", fixture.envPath,
       "--skill-dir", fixture.skillPath,
+      "--approve-capability-update",
     ]);
+    const releaseVersion = releaseMetadata().manifest.skill_version;
     assert.equal(result.code, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), {
       status: "updated",
-      installed_version: "0.4.3",
+      installed_version: releaseVersion,
       previous_version: "0.3.0",
     });
     const state = JSON.parse(await readFile(join(fixture.skillPath, ".caller-release.json"), "utf8"));
-    assert.equal(state.skill_version, "0.4.3");
+    assert.equal(state.skill_version, releaseVersion);
     assert.match(await readFile(join(fixture.skillPath, "SKILL.md"), "utf8"), /keep the skill current/i);
     assert.equal(await readFile(join(fixture.rollbackPath, "SKILL.md"), "utf8"), "old active skill\n");
     await assert.rejects(access(fixture.legacyPreviousPath));

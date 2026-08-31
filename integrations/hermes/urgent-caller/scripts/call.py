@@ -10,8 +10,22 @@ import time
 import urllib.error
 import urllib.request
 
-SKILL_VERSION = "0.4.3"
+SKILL_VERSION = "0.5.18"
 USER_AGENT = f"AgentCall-Hermes/{SKILL_VERSION}"
+
+
+def profile_credentials(env_file, profile):
+    path = pathlib.Path(env_file).expanduser().parent / "caller-profiles" / f"{profile}.env"
+    values = {}
+    if path.exists():
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key in {"CALLER_RELAY_URL", "CALLER_AGENT_TOKEN"}:
+                values[key] = value.strip().strip('"').strip("'")
+    return values
 
 
 def main():
@@ -19,14 +33,17 @@ def main():
     parser.add_argument("--message", required=True)
     parser.add_argument("--at", dest="scheduled_at")
     parser.add_argument("--caller-name", default="Hermes")
-    parser.add_argument("--live", action="store_true", help="Start a live Grok voice conversation with Hermes MCP access")
+    parser.add_argument("--live", action="store_true", help="Start a live voice conversation with Hermes tool access")
     parser.add_argument("--reason", help="Why Hermes is placing the live call now")
-    parser.add_argument("--relevant-context", help="Facts Grok needs to open the live conversation")
+    parser.add_argument("--relevant-context", help="Facts the voice model needs to open the live conversation")
     parser.add_argument("--desired-outcome", help="The decision or information Hermes needs from the call")
+    parser.add_argument("--opening-question", help="One natural question for Sol to speak after pickup")
     parser.add_argument("--urgency", choices=("normal", "important", "urgent"))
     parser.add_argument("--audio-file", help="Optional MP3, M4A, AAC, WAV, AIFF, or CAF speech file")
     parser.add_argument("--audio-content-type", help="Override the MIME type detected from --audio-file")
     parser.add_argument("--idempotency-key", required=True)
+    parser.add_argument("--profile", help="Call an additional paired phone by profile name (see pair.py --profile)")
+    parser.add_argument("--env-file", default=os.path.expanduser("~/.hermes/.env"), help="Hermes environment file used to locate profile credentials")
     parser.add_argument(
         "--wait-seconds",
         type=float,
@@ -34,11 +51,19 @@ def main():
     )
     args = parser.parse_args()
 
-    relay_url = os.environ.get("CALLER_RELAY_URL", "").rstrip("/")
-    agent_token = os.environ.get("CALLER_AGENT_TOKEN", "")
-    if not relay_url or not agent_token:
-        print("Caller is not paired. CALLER_RELAY_URL and CALLER_AGENT_TOKEN are required.", file=sys.stderr)
-        return 2
+    if args.profile:
+        stored = profile_credentials(args.env_file, args.profile)
+        relay_url = stored.get("CALLER_RELAY_URL", "").rstrip("/")
+        agent_token = stored.get("CALLER_AGENT_TOKEN", "")
+        if not relay_url or not agent_token:
+            print(f"Caller profile '{args.profile}' is not paired. Run pair.py --profile {args.profile} first.", file=sys.stderr)
+            return 2
+    else:
+        relay_url = os.environ.get("CALLER_RELAY_URL", "").rstrip("/")
+        agent_token = os.environ.get("CALLER_AGENT_TOKEN", "")
+        if not relay_url or not agent_token:
+            print("Caller is not paired. CALLER_RELAY_URL and CALLER_AGENT_TOKEN are required.", file=sys.stderr)
+            return 2
 
     payload = {"caller_name": args.caller_name, "message": args.message}
     if args.live:
@@ -46,6 +71,7 @@ def main():
             "reason": args.reason,
             "relevant_context": args.relevant_context,
             "desired_outcome": args.desired_outcome,
+            "opening_question": args.opening_question,
             "urgency": args.urgency,
         }
         missing = [name.replace("_", "-") for name, value in context_values.items() if not value]

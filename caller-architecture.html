@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Caller — Hermes to GPT Live Architecture</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page: light-dark(#f7f8fb, #0b0d12);
+      --surface: light-dark(#ffffff, #141821);
+      --surface-2: light-dark(#f0f3f8, #1b2130);
+      --ink: light-dark(#151923, #f4f6fb);
+      --muted: light-dark(#626b7c, #aab3c4);
+      --line: light-dark(#d8deea, #303849);
+      --orange: light-dark(#c84f16, #ff8c52);
+      --orange-soft: light-dark(#fff0e8, #3a2119);
+      --blue: light-dark(#1769c2, #6eb2ff);
+      --blue-soft: light-dark(#eaf4ff, #142943);
+      --green: light-dark(#177447, #65d99b);
+      --green-soft: light-dark(#e9f8f0, #153328);
+      --purple: light-dark(#7048bd, #b89aff);
+      --purple-soft: light-dark(#f2edff, #28203d);
+      --shadow: light-dark(0 18px 50px rgba(25, 36, 56, .10), 0 20px 60px rgba(0, 0, 0, .30));
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 10% -10%, color-mix(in srgb, var(--orange) 12%, transparent), transparent 30rem),
+        radial-gradient(circle at 95% 0%, color-mix(in srgb, var(--blue) 12%, transparent), transparent 34rem),
+        var(--page);
+      color: var(--ink);
+      font: 15px/1.5 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    button { font: inherit; }
+    .shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 48px 0 64px; }
+    .eyebrow { color: var(--orange); font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    h1 { max-width: 780px; margin: 10px 0 12px; font-size: clamp(32px, 5vw, 58px); line-height: 1.03; letter-spacing: -.045em; }
+    .lede { max-width: 760px; margin: 0; color: var(--muted); font-size: clamp(16px, 2vw, 20px); }
+    .status-row { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 24px; }
+    .status { border: 1px solid var(--line); border-radius: 999px; padding: 6px 10px; background: color-mix(in srgb, var(--surface) 78%, transparent); font-size: 12px; }
+
+    .architecture {
+      margin-top: 34px;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: color-mix(in srgb, var(--surface) 92%, transparent);
+      box-shadow: var(--shadow);
+    }
+
+    .section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+    h2 { margin: 0; font-size: 21px; letter-spacing: -.02em; }
+    .section-head p { margin: 0; color: var(--muted); font-size: 13px; }
+    .flow { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); align-items: center; gap: 8px; }
+    .node {
+      position: relative;
+      min-height: 130px;
+      padding: 14px 12px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--surface-2);
+      transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease, opacity .2s ease;
+    }
+    .node.active { border-color: var(--orange); box-shadow: 0 0 0 3px color-mix(in srgb, var(--orange) 18%, transparent); transform: translateY(-3px); }
+    .node.dim { opacity: .46; }
+    .node small { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+    .node strong { display: block; margin: 6px 0 5px; font-size: 15px; line-height: 1.25; }
+    .node span { display: block; color: var(--muted); font-size: 12px; line-height: 1.38; }
+    .icon { display: grid; place-items: center; width: 30px; height: 30px; margin-bottom: 10px; border-radius: 10px; background: var(--orange-soft); color: var(--orange); font-weight: 800; }
+    .node:nth-of-type(3) .icon { background: var(--purple-soft); color: var(--purple); }
+    .node:nth-of-type(5) .icon { background: var(--blue-soft); color: var(--blue); }
+    .node:nth-of-type(7) .icon, .node:nth-of-type(9) .icon { background: var(--green-soft); color: var(--green); }
+    .arrow { position: relative; height: 2px; background: var(--line); transition: background .2s ease, opacity .2s ease; }
+    .arrow::after { content: ""; position: absolute; right: -1px; top: -4px; border-left: 7px solid var(--line); border-top: 5px solid transparent; border-bottom: 5px solid transparent; transition: border-color .2s ease; }
+    .arrow.active { background: var(--orange); }
+    .arrow.active::after { border-left-color: var(--orange); }
+    .arrow.dim { opacity: .35; }
+
+    .stepper { margin-top: 18px; }
+    .step-buttons { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 7px; }
+    .step-button {
+      min-height: 54px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      transition: background .2s ease, border-color .2s ease, color .2s ease;
+    }
+    .step-button:hover { border-color: var(--orange); color: var(--ink); }
+    .step-button[aria-pressed="true"] { border-color: var(--orange); background: var(--orange-soft); color: var(--ink); }
+    .step-button b { display: block; color: var(--orange); font-size: 11px; }
+    .detail {
+      display: grid;
+      grid-template-columns: minmax(0, .8fr) minmax(280px, 1.2fr);
+      gap: 18px;
+      margin-top: 14px;
+      padding: 18px;
+      border-radius: 16px;
+      background: var(--surface-2);
+    }
+    .detail h3 { margin: 0 0 5px; font-size: 17px; }
+    .detail p { margin: 0; color: var(--muted); }
+    .payload { min-width: 0; padding: 14px; border-left: 3px solid var(--orange); background: color-mix(in srgb, var(--surface) 72%, transparent); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+    .lower { display: grid; grid-template-columns: 1.15fr .85fr; gap: 20px; margin-top: 20px; }
+    .panel { padding: 22px; border: 1px solid var(--line); border-radius: 20px; background: color-mix(in srgb, var(--surface) 92%, transparent); }
+    .prompt-stack { display: grid; gap: 9px; margin-top: 16px; }
+    .layer { display: grid; grid-template-columns: 34px 150px 1fr; align-items: start; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+    .layer:last-child { border-bottom: 0; }
+    .layer-num { display: grid; place-items: center; width: 27px; height: 27px; border-radius: 50%; background: var(--orange-soft); color: var(--orange); font-size: 12px; font-weight: 800; }
+    .layer strong { font-size: 13px; }
+    .layer p { margin: 0; color: var(--muted); font-size: 13px; }
+    code { color: var(--blue); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .credential-map { margin-top: 18px; }
+    .credential-node { padding: 13px; border-radius: 14px; background: var(--surface-2); }
+    .credential-node strong { display: block; font-size: 13px; }
+    .credential-node span { color: var(--muted); font-size: 12px; }
+    .credential-line { display: flex; align-items: center; gap: 10px; padding: 7px 0; color: var(--muted); font-size: 12px; }
+    .credential-line::before { content: "↓"; color: var(--green); font-size: 18px; }
+    .never { margin-top: 16px; padding: 12px; border-radius: 14px; background: var(--green-soft); color: var(--green); font-size: 13px; }
+
+    footer { margin-top: 22px; color: var(--muted); font-size: 12px; text-align: center; }
+
+    @media (max-width: 900px) {
+      .flow { grid-template-columns: 1fr 34px 1fr 34px 1fr; }
+      .flow .node:nth-of-type(5) { grid-column: 1; grid-row: 2; }
+      .flow .arrow:nth-of-type(6) { grid-column: 2; grid-row: 2; }
+      .flow .node:nth-of-type(7) { grid-column: 3; grid-row: 2; }
+      .flow .arrow:nth-of-type(8) { grid-column: 4; grid-row: 2; }
+      .flow .node:nth-of-type(9) { grid-column: 5; grid-row: 2; }
+      .step-buttons { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .lower { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 20px, 1180px); padding-top: 28px; }
+      .architecture, .panel { padding: 15px; border-radius: 16px; }
+      .section-head { align-items: flex-start; flex-direction: column; }
+      .flow { grid-template-columns: 1fr; }
+      .flow .node, .flow .arrow { grid-column: 1 !important; grid-row: auto !important; }
+      .node { min-height: 0; }
+      .arrow { width: 2px; height: 24px; margin: 0 auto; }
+      .arrow::after { right: -4px; top: auto; bottom: -2px; border-top: 7px solid var(--line); border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 0; }
+      .arrow.active::after { border-top-color: var(--orange); border-left-color: transparent; }
+      .step-buttons { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .detail { grid-template-columns: 1fr; }
+      .layer { grid-template-columns: 30px 1fr; }
+      .layer p { grid-column: 2; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="eyebrow">Caller architecture · Live deployment</div>
+      <h1>Hermes decides to call. Sol carries the conversation.</h1>
+      <p class="lede">Caller connects a Hermes task on DebianBat to a subscription-backed Codex realtime session, then bridges that session directly into a native iPhone call.</p>
+      <div class="status-row" aria-label="Current configuration">
+        <span class="status">Provider: Codex V3</span>
+        <span class="status">Voice: Sol</span>
+        <span class="status">Transport: WebRTC</span>
+        <span class="status">Authentication: Hermes credential pool</span>
+        <span class="status">Local TTS: disabled</span>
+      </div>
+    </header>
+
+    <section class="architecture" aria-labelledby="flow-title">
+      <div class="section-head">
+        <div>
+          <div class="eyebrow">Call lifecycle</div>
+          <h2 id="flow-title">From a Hermes request to live audio</h2>
+        </div>
+        <p>Select a step to inspect the handoff.</p>
+      </div>
+
+      <div class="flow" aria-label="Hermes to Caller architecture">
+        <article class="node" data-node="0"><div class="icon">H</div><small>DebianBat</small><strong>Hermes agent</strong><span>Understands the request and prepares the call briefing.</span></article>
+        <div class="arrow" data-edge="0" aria-hidden="true"></div>
+        <article class="node" data-node="1"><div class="icon">S</div><small>Local skill</small><strong>urgent-caller</strong><span>Authenticates the request and submits the structured call.</span></article>
+        <div class="arrow" data-edge="1" aria-hidden="true"></div>
+        <article class="node" data-node="2"><div class="icon">W</div><small>Cloudflare</small><strong>Caller Worker</strong><span>Stores state, prewarms Codex and delivers the VoIP push.</span></article>
+        <div class="arrow" data-edge="2" aria-hidden="true"></div>
+        <article class="node" data-node="3"><div class="icon">C</div><small>DebianBat</small><strong>Voice connector</strong><span>Runs Codex app-server using Hermes-owned credentials.</span></article>
+        <div class="arrow" data-edge="3" aria-hidden="true"></div>
+        <article class="node" data-node="4"><div class="icon">G</div><small>iPhone ↔ OpenAI</small><strong>GPT Live · Sol</strong><span>Streams realtime speech over WebRTC into the CallKit call.</span></article>
+      </div>
+
+      <div class="stepper">
+        <div class="step-buttons" role="group" aria-label="Call lifecycle steps">
+          <button class="step-button" type="button" data-step="0"><b>01</b>Brief</button>
+          <button class="step-button" type="button" data-step="1"><b>02</b>Submit</button>
+          <button class="step-button" type="button" data-step="2"><b>03</b>Prewarm</button>
+          <button class="step-button" type="button" data-step="3"><b>04</b>Ring</button>
+          <button class="step-button" type="button" data-step="4"><b>05</b>Connect</button>
+          <button class="step-button" type="button" data-step="5"><b>06</b>Pickup</button>
+          <button class="step-button" type="button" data-step="6"><b>07</b>Speak</button>
+          <button class="step-button" type="button" data-step="7"><b>08</b>Ask Hermes</button>
+        </div>
+        <div class="detail" aria-live="polite">
+          <div><h3 id="step-title">Hermes turns intent into a call briefing</h3><p id="step-copy">The originating Hermes agent uses the installed urgent-caller skill. It authors the minimum context the voice agent needs and retains the originating Hermes session lineage.</p></div>
+          <div class="payload" id="step-payload">reason: "Daily omega-3 check-in"
+relevant_context: "Ask whether Chirag took it today"
+desired_outcome: "Record yes with Hermes"
+urgency: "normal"
+opening_question: "Did you take your omega-3 today?"</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="lower">
+      <section class="panel" aria-labelledby="prompt-title">
+        <div class="eyebrow">Prompt injection</div>
+        <h2 id="prompt-title">Five layers, injected at different times</h2>
+        <div class="prompt-stack">
+          <div class="layer"><span class="layer-num">1</span><strong>Hermes briefing</strong><p>Hermes converts the user request into <code>reason</code>, <code>relevant_context</code>, <code>desired_outcome</code>, <code>urgency</code> and <code>opening_question</code>.</p></div>
+          <div class="layer"><span class="layer-num">2</span><strong>Voice instructions</strong><p>The Worker adds the concise phone-agent rules and embeds the briefing as untrusted JSON inside <code>&lt;call_briefing&gt;</code>.</p></div>
+          <div class="layer"><span class="layer-num">3</span><strong>Ringing guard</strong><p>The connector adds: remain silent until Caller confirms that the user answered.</p></div>
+          <div class="layer"><span class="layer-num">4</span><strong>Pickup event</strong><p>After CallKit answers, the connector injects a trusted <code>&lt;caller_event&gt;</code> with <code>appendText</code>.</p></div>
+          <div class="layer"><span class="layer-num">5</span><strong>Opening speech</strong><p>The Hermes-authored question is sent with <code>appendSpeech</code>. Sol voices it; subsequent dialogue is generated live.</p></div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="credential-title">
+        <div class="eyebrow">Credential boundary</div>
+        <h2 id="credential-title">The Codex token stays on DebianBat</h2>
+        <div class="credential-map">
+          <div class="credential-node"><strong>Hermes <code>openai-codex</code> pool</strong><span>Selects and refreshes the existing subscription credential.</span></div>
+          <div class="credential-line">Local process handoff</div>
+          <div class="credential-node"><strong>Caller voice connector</strong><span>Starts <code>codex app-server</code> and authenticates it over stdio.</span></div>
+          <div class="credential-line">Authenticated Codex connection</div>
+          <div class="credential-node"><strong>OpenAI GPT Live</strong><span>Returns WebRTC session negotiation and Sol audio.</span></div>
+        </div>
+        <div class="never"><strong>Never sent to:</strong> the iPhone, APNs, D1 or the Cloudflare Worker.</div>
+      </section>
+    </div>
+
+    <footer>Caller build 9 · Hermes urgent-caller 0.5.17 · Codex realtime V3</footer>
+  </main>
+
+  <script>
+    const steps = [
+      {
+        title: "Hermes turns intent into a call briefing",
+        copy: "The originating Hermes agent uses the installed urgent-caller skill. It authors the minimum context the voice agent needs and retains the originating Hermes session lineage.",
+        payload: 'reason: "Daily omega-3 check-in"\nrelevant_context: "Ask whether Chirag took it today"\ndesired_outcome: "Record yes with Hermes"\nurgency: "normal"\nopening_question: "Did you take your omega-3 today?"',
+        nodes: [0], edge: null
+      },
+      {
+        title: "The signed skill submits the call",
+        copy: "call.py sends the briefing, fallback message and originating session ID to the Worker using the installation-scoped Caller agent credential.",
+        payload: "POST /v1/calls\nmode: live_voice\ncall_context: { … }\norigin_hermes_session_id: active Hermes session",
+        nodes: [0, 1], edge: 0
+      },
+      {
+        title: "Codex is prepared before the phone rings",
+        copy: "The Worker asks the outbound DebianBat connector to prepare an ephemeral Codex thread. Only after that succeeds does it send the VoIP notification.",
+        payload: "voice.session.prepare\n  ↓\nthread/start\nephemeral: true\nsandbox: read-only\ndynamicTools: ask_hermes, check_hermes_task",
+        nodes: [1, 2, 3], edge: 2
+      },
+      {
+        title: "APNs presents the native incoming call",
+        copy: "The Worker sends a small VoIP push. Caller reports it through CallKit and immediately begins creating its WebRTC offer while the phone is still ringing.",
+        payload: "APNs VoIP push\n  call_id\n  caller_name: Hermes\n  mode: live_voice\n\nNo Codex token. No full briefing.",
+        nodes: [2, 4], edge: 3
+      },
+      {
+        title: "The realtime session connects while ringing",
+        copy: "Caller sends its SDP offer through the Worker. The connector injects the briefing into Codex V3 realtimeStartInstructions and returns the SDP answer to the iPhone.",
+        payload: "thread/realtime/start\nversion: v3\nvoice: sol\noutputModality: audio\ntransport: { type: webrtc, sdp: offer }\nrealtimeStartInstructions: voice prompt + briefing",
+        nodes: [2, 3, 4], edge: 3
+      },
+      {
+        title: "Pickup grants permission to speak",
+        copy: "CallKit activation starts the connection tone. Caller reports the answer through the authenticated voice-session endpoint; only then does the connector tell Codex the user answered.",
+        payload: "POST /voice-sessions/{id}/answered\n  ↓\nvoice.session.answer\n  ↓\nthread/realtime/appendText\n<caller_event>The user answered…</caller_event>",
+        nodes: [2, 3, 4], edge: 3
+      },
+      {
+        title: "Sol asks the deterministic opening question",
+        copy: "The connector uses Codex V3 appendSpeech. This is GPT Live audio in the Sol voice—not iOS text-to-speech. The microphone is enabled after the server acknowledges the pickup signal.",
+        payload: "thread/realtime/appendSpeech\ntext: opening_question\n\nWebRTC remote audio → CallKit\nCallKit microphone → WebRTC input",
+        nodes: [3, 4], edge: 3
+      },
+      {
+        title: "GPT Live can consult the originating Hermes agent",
+        copy: "When deeper context or an action is needed, GPT Live calls ask_hermes. The Worker routes a durable operation back to the originating Hermes session and later injects the result into the live thread.",
+        payload: "GPT Live tool call: ask_hermes\n  ↓ call-scoped token\nWorker durable operation\n  ↓ origin_hermes_session_id\nHermes result\n  ↓\nappendText role: developer",
+        nodes: [0, 2, 3, 4], edge: 1
+      }
+    ];
+
+    const buttons = [...document.querySelectorAll(".step-button")];
+    const nodes = [...document.querySelectorAll(".node")];
+    const edges = [...document.querySelectorAll(".arrow")];
+    const title = document.getElementById("step-title");
+    const copy = document.getElementById("step-copy");
+    const payload = document.getElementById("step-payload");
+
+    function showStep(index) {
+      const step = steps[index];
+      buttons.forEach((button, buttonIndex) => button.setAttribute("aria-pressed", String(buttonIndex === index)));
+      nodes.forEach((node, nodeIndex) => {
+        node.classList.toggle("active", step.nodes.includes(nodeIndex));
+        node.classList.toggle("dim", !step.nodes.includes(nodeIndex));
+      });
+      edges.forEach((edge, edgeIndex) => {
+        edge.classList.toggle("active", edgeIndex === step.edge);
+        edge.classList.toggle("dim", step.edge !== null && edgeIndex !== step.edge);
+      });
+      title.textContent = step.title;
+      copy.textContent = step.copy;
+      payload.textContent = step.payload;
+    }
+
+    buttons.forEach((button) => button.addEventListener("click", () => showStep(Number(button.dataset.step))));
+    showStep(0);
+  </script>
+</body>
+</html>

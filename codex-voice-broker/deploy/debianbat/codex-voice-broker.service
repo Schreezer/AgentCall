@@ -1,0 +1,27 @@
+[Unit]
+Description=AgentCaller Codex realtime voice broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chirag
+Group=chirag
+WorkingDirectory=/home/chirag/agentcaller-codex-voice-broker
+Environment=HOME=/home/chirag
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/home/chirag/.config/agentcaller/codex-voice-broker.env
+ExecStart=/usr/bin/node /home/chirag/agentcaller-codex-voice-broker/src/server.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/chirag/.codex
+StateDirectory=agentcaller-codex-voice
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,11 @@
 import Foundation
 
 struct VoiceBootstrap: Decodable, Sendable {
+    enum Provider: String, Decodable, Sendable {
+        case xai
+        case codex
+    }
+
     struct XAI: Decodable, Sendable {
         let model: String
         let ephemeralToken: String
@@ -59,15 +64,37 @@ struct VoiceBootstrap: Decodable, Sendable {
         }
     }
 
+    struct WebRTC: Decodable, Sendable {
+        let answerSDP: String
+        let expiresAt: Date
+
+        enum CodingKeys: String, CodingKey {
+            case answerSDP = "answer_sdp"
+            case expiresAt = "expires_at"
+        }
+    }
+
+    let provider: Provider
     let callID: String
     let voiceSessionID: String
-    let xai: XAI
-    let session: Session
+    let xai: XAI?
+    let session: Session?
+    let webrtc: WebRTC?
 
     enum CodingKeys: String, CodingKey {
-        case xai, session
+        case provider, xai, session, webrtc
         case callID = "call_id"
         case voiceSessionID = "voice_session_id"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try container.decodeIfPresent(Provider.self, forKey: .provider) ?? .xai
+        callID = try container.decode(String.self, forKey: .callID)
+        voiceSessionID = try container.decode(String.self, forKey: .voiceSessionID)
+        xai = try container.decodeIfPresent(XAI.self, forKey: .xai)
+        session = try container.decodeIfPresent(Session.self, forKey: .session)
+        webrtc = try container.decodeIfPresent(WebRTC.self, forKey: .webrtc)
     }
 }
 
@@ -138,13 +165,16 @@ struct VoiceBootstrapClient: Sendable {
     let installationSecret: String
     var session: URLSession = .shared
 
-    func create(callID: UUID) async throws -> VoiceBootstrap {
+    func create(callID: UUID, offerSDP: String? = nil) async throws -> VoiceBootstrap {
         var request = authenticatedRequest(
             path: "v1/installations/\(installationID)/calls/\(callID.uuidString.lowercased())/voice-bootstrap"
         )
+        request.timeoutInterval = 45
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Data("{}".utf8)
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: offerSDP.map { ["offer_sdp": $0] } ?? [:]
+        )
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw VoiceBootstrapError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else { throw VoiceBootstrapError.rejected(http.statusCode) }
@@ -159,6 +189,16 @@ struct VoiceBootstrapClient: Sendable {
         )
         request.httpMethod = "DELETE"
         _ = try? await session.data(for: request)
+    }
+
+    func markAnswered(voiceSessionID: String) async throws {
+        var request = authenticatedRequest(
+            path: "v1/installations/\(installationID)/voice-sessions/\(voiceSessionID)/answered"
+        )
+        request.httpMethod = "POST"
+        let (_, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw VoiceBootstrapError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else { throw VoiceBootstrapError.rejected(http.statusCode) }
     }
 
     func hermesEvents(voiceSessionID: String, after cursor: Int) async throws -> HermesOperationEventPage {

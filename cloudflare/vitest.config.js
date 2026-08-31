@@ -35,6 +35,8 @@ export default defineConfig({
           APNS_PRIVATE_KEY: process.env.APNS_PRIVATE_KEY,
           XAI_API_KEY: "test-xai-key",
           LIVE_VOICE_ENABLED: "true",
+          LIVE_VOICE_BACKEND: "legacy",
+          LIVE_VOICE_PROVIDER: "xai",
         },
       },
     })),

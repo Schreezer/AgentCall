@@ -19,6 +19,45 @@ python3 scripts/pair.py \
 
 The script exchanges the code for a credential scoped to one Caller installation and stores `CALLER_RELAY_URL` and `CALLER_AGENT_TOKEN` in the Hermes environment file with mode 600. Never print or include the token in conversational output. Restart only the supervised gateway that needs the new environment.
 
+## Pair an additional phone (family profiles)
+
+One Hermes host can pair more than one Caller installation, for example a parent's iPhone for a daily check-in. Each phone runs its own copy of the Caller app and produces its own one-time pairing code. Store an additional pairing under a named profile instead of the default environment:
+
+```bash
+python3 scripts/pair.py \
+  --relay-url "https://push.caller.example" \
+  --code "ABCD-EFGH" \
+  --profile mom
+```
+
+Before pairing, ask the user whose phone this is (name and relationship), what language that person is most comfortable speaking, and pick a short lowercase profile name together (for example `mom` or `dad`). Profile credentials are stored in `~/.hermes/caller-profiles/<profile>.env` with mode 600; never print them. Then install a per-profile voice connector so live calls to that phone can start:
+
+```bash
+python3 scripts/voice_connector.py install --profile mom
+```
+
+This creates `caller-voice-connector-<profile>.service` alongside the default connector; both share the same Hermes-owned provider credentials. Pass `--profile <name>` to `call.py` to place a call to that phone. Without `--profile`, every command keeps addressing the user's own phone. Ask the user's permission, then place one test call to the new profile and have the family member answer it before scheduling anything recurring.
+
+## Enable live voice from Hermes credentials
+
+Caller does not collect an xAI key or a Codex login. After pairing and installing the signed skill, inspect the local provider state without printing credentials:
+
+```bash
+python3 scripts/voice_connector.py diagnose
+```
+
+The connector prefers an available `openai-codex` credential-pool entry, then falls back to Hermes's `XAI_API_KEY`. A Codex entry is supplied to the official local `codex app-server` through experimental `chatgptAuthTokens`; refresh stays behind Hermes's existing cross-process credential-pool lock. An xAI API key is used locally only to mint a short-lived Realtime client secret. The permanent Codex token, refresh token, and xAI API key never go to Caller, its Worker, or the iPhone.
+
+If neither provider is ready, ask the user to authenticate through Hermes: use Hermes's normal `openai-codex` login flow or configure `XAI_API_KEY`. Do not ask the user to paste either credential into Caller. Codex voice requires the official `codex` executable at version 0.150.1 or newer; older versions send an incompatible realtime session shape. Set `CALLER_CODEX_COMMAND` only when its trusted installed path is not discoverable as `codex`.
+
+Once diagnosis reports a provider, install the supervised outbound connector:
+
+```bash
+python3 scripts/voice_connector.py install
+```
+
+It opens an authenticated outbound WebSocket to the installation-scoped Worker rendezvous, so no inbound port, public broker, or copied provider secret is required. The installer also enables `caller-skill-update.timer`, a persistent daily signed-update check with randomized delay. Verify `caller-voice-connector.service` is active, verify the timer is scheduled, and rerun the live-voice diagnostic. The Worker may see only provider readiness; during a call it receives a Codex SDP answer or an xAI ephemeral token, never permanent provider credentials.
+
 ## Keep the skill current
 
 Caller releases are retrieved from the paired relay, verified against the public Ed25519 key pinned in `scripts/update.py`, downloaded into a staging directory, self-tested, and atomically activated. Run this once per day using the existing Hermes scheduler or a supervised system timer:
@@ -55,12 +94,40 @@ python3 scripts/call.py \
   --relevant-context "The direct option is INR 4,000 more than the one-stop option." \
   --desired-outcome "Ask which option Chirag wants Hermes to continue with." \
   --urgency important \
+  --opening-question "Which option do you want Hermes to continue with?" \
   --idempotency-key "flight-decision-2026-08-02"
 ```
 
-Hermes supplies `HERMES_SESSION_ID` to the skill process; never invent, summarize, or expose it. The relay stores the full briefing but sends only the short `--message`, call ID, caller name, and mode through PushKit. After answer, Grok speaks the briefing and may call `ask_hermes`, which acknowledges `queued` immediately. Caller then delivers later status transitions and the terminal result into the active Grok conversation automatically, even when Hermes takes longer than the original tool call. `check_hermes_task` is only for a user-requested status check or reported event-delivery failure. Grok owns the wording; do not script a forced reply.
+Hermes supplies `HERMES_SESSION_ID` to the skill process; never invent, summarize, or expose it. The relay stores the full briefing but sends only the short `--message`, call ID, caller name, and mode through PushKit. Hermes writes one concise `--opening-question` from the immediate goal. After pickup, Caller sends it through the live provider's speech channel, so Sol speaks it; Caller never substitutes device TTS. The live model can then converse normally and may call `ask_hermes`, which acknowledges `queued` immediately. Caller delivers later status transitions and the terminal result into the active conversation automatically, even when Hermes takes longer than the original tool call. `check_hermes_task` is only for a user-requested status check or reported event-delivery failure.
 
-The message remains a deliberately short fallback if live bootstrap or xAI audio fails. The four structured briefing fields are mandatory. Put only the minimum facts necessary for the opening conversation in them; Grok can ask Hermes for deeper context through the signed originating session.
+The message remains a deliberately short fallback if live bootstrap fails. The five structured briefing fields are mandatory. Put only the minimum facts necessary for the opening conversation in them; the voice model can ask Hermes for deeper context through the signed originating session.
+
+## Recurring family check-in call
+
+A user-approved daily check-in with a family member is the one recurring call this skill supports. Set it up only after the user explicitly approves the schedule, the daily time, and the questions, and after the family member has answered a successful test call. Use the existing Hermes scheduler to run one live call per day against that person's profile:
+
+```bash
+python3 scripts/call.py \
+  --profile mom \
+  --live \
+  --caller-name "Chirag's Assistant" \
+  --message "Hi, this is your son's assistant calling for the daily check-in." \
+  --reason "The user asked for a short daily check-in call with this family member." \
+  --relevant-context "You are speaking with the user's mother. Be warm, unhurried, and simple; speak the language she is most comfortable with, switching if she does. Ask at most three things: whether she took her medication today, what she has eaten, and how she is feeling. Keep the call under three minutes. Before saying goodbye, send a 3-4 sentence summary of her answers and anything she complained about to Hermes using ask_hermes." \
+  --desired-outcome "A short summary of medication, meals, and wellbeing reported back through ask_hermes before the call ends." \
+  --urgency normal \
+  --opening-question "Namaste! Chirag asked me to check in - how are you feeling today?" \
+  --idempotency-key "checkin-mom-2026-08-31"
+```
+
+Check-in rules:
+
+- Use a date-scoped idempotency key (`checkin-<profile>-<YYYY-MM-DD>`) so a retried scheduler task cannot ring twice.
+- Adapt the briefing to what the user configured for this person: their name, language, medication list, and preferred questions. Never invent medical details.
+- When the summary arrives through `ask_hermes`, append one JSON line to `~/.hermes/caller-checkins/<profile>.jsonl` with the date, whether the call was answered, and the summary, then forward the summary to the user on their normal chat channel.
+- If no summary has arrived 20 minutes after the call was delivered, place exactly one retry with `-retry` appended to the idempotency key. If the retry also produces nothing, tell the user the check-in went unanswered instead of calling again.
+- On request, produce a weekly digest from the stored summaries: missed days, recurring complaints, and anything mentioned repeatedly.
+- Share summaries only with the user. Never include health details in any other output, and never place additional calls to a family member beyond the approved schedule unless the user explicitly asks.
 
 ## Judgment rules
 

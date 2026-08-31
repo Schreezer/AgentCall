@@ -1,0 +1,6 @@
+# Add this inside the existing :80 site, before the final `respond / "ok" 200`.
+# handle_path strips /caller-codex before proxying, so the broker receives /health
+# and /v1/sessions/... exactly as defined by its private HTTP contract.
+handle_path /caller-codex/* {
+    reverse_proxy 127.0.0.1:8792
+}

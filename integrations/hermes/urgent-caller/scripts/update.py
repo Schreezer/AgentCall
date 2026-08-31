@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 
 SKILL_NAME = "urgent-caller"
-CURRENT_VERSION = "0.4.3"
+CURRENT_VERSION = "0.5.18"
 USER_AGENT = f"AgentCall-Hermes/{CURRENT_VERSION}"
 TRUSTED_RELEASE_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA0PXJ6vcqM8/U55Og/X1tPEq4zJk2WwYfiGbeGNTGW9g=
@@ -134,7 +134,13 @@ def validate_manifest(manifest):
             raise ValueError(f"invalid release size: {path}")
         if not isinstance(entry.get("sha256"), str) or len(entry["sha256"]) != 64:
             raise ValueError(f"invalid release digest: {path}")
-    required = {"SKILL.md", "scripts/call.py", "scripts/pair.py", "scripts/update.py"}
+    required = {
+        "SKILL.md",
+        "scripts/call.py",
+        "scripts/pair.py",
+        "scripts/update.py",
+        "scripts/voice_connector.py",
+    }
     if not required.issubset(seen):
         raise ValueError("release is missing required skill files")
 
@@ -160,7 +166,7 @@ def self_test(stage):
     skill_text = (stage / "SKILL.md").read_text()
     if not skill_text.startswith("---\n") or "name: urgent-caller" not in skill_text[:500]:
         raise RuntimeError("staged skill metadata is invalid")
-    for script_name in ("call.py", "pair.py", "update.py"):
+    for script_name in ("call.py", "pair.py", "update.py", "voice_connector.py"):
         result = subprocess.run(
             [sys.executable, str(stage / "scripts" / script_name), "--help"],
             capture_output=True,
@@ -218,6 +224,18 @@ def activate(stage, skill_dir, manifest):
         raise
 
 
+def restart_voice_connector():
+    # The glob also matches per-profile connector units (caller-voice-connector-<profile>.service).
+    commands = [["systemctl", "--user", "try-restart", "caller-voice-connector.service", "caller-voice-connector-*.service"]]
+    if os.geteuid() == 0:
+        commands.append(["systemctl", "try-restart", "caller-voice-connector.service", "caller-voice-connector-*.service"])
+    for command in commands:
+        try:
+            subprocess.run(command, capture_output=True, check=False, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
 def main():
     parser = argparse.ArgumentParser(description="Check and install signed urgent-caller skill releases")
     parser.add_argument("--relay-url")
@@ -273,6 +291,7 @@ def main():
             download_release(relay_url, token, manifest, stage)
             self_test(stage)
             activate(stage, skill_dir, manifest)
+            restart_voice_connector()
         finally:
             if stage.exists():
                 shutil.rmtree(stage)

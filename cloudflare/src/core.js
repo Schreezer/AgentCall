@@ -66,7 +66,7 @@ export function validateCall(body, now = Date.now()) {
     if (!body.call_context || typeof body.call_context !== "object") {
       return { error: "live_voice_call_context_required" };
     }
-    const fields = ["reason", "relevant_context", "desired_outcome", "urgency"];
+    const fields = ["reason", "relevant_context", "desired_outcome", "urgency", "opening_question"];
     callContext = {};
     for (const field of fields) {
       const value = body.call_context[field];

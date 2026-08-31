@@ -3,12 +3,14 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import sys
 import urllib.error
 import urllib.request
 
-SKILL_VERSION = "0.4.3"
+SKILL_VERSION = "0.5.18"
 USER_AGENT = f"AgentCall-Hermes/{SKILL_VERSION}"
+PROFILE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 
 def main():
@@ -16,7 +18,12 @@ def main():
     parser.add_argument("--relay-url", required=True)
     parser.add_argument("--code", required=True)
     parser.add_argument("--env-file", default=os.path.expanduser("~/.hermes/.env"))
+    parser.add_argument("--profile", help="Store this pairing under a named profile for an additional phone (e.g. mom)")
     args = parser.parse_args()
+
+    if args.profile and not PROFILE_PATTERN.match(args.profile):
+        print("Profile names must be 1-32 lowercase letters, digits, or hyphens.", file=sys.stderr)
+        return 2
 
     relay_url = args.relay_url.rstrip("/")
     request = urllib.request.Request(
@@ -40,13 +47,26 @@ def main():
         return 1
 
     env_path = pathlib.Path(args.env_file).expanduser()
-    env_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.profile:
+        profiles_dir = env_path.parent / "caller-profiles"
+        profiles_dir.mkdir(parents=True, exist_ok=True)
+        profiles_dir.chmod(0o700)
+        env_path = profiles_dir / f"{args.profile}.env"
+    else:
+        env_path.parent.mkdir(parents=True, exist_ok=True)
     existing = env_path.read_text() if env_path.exists() else ""
     retained = [line for line in existing.splitlines() if not line.startswith(("CALLER_RELAY_URL=", "CALLER_AGENT_TOKEN="))]
     retained.extend([f"CALLER_RELAY_URL={relay_url}", f"CALLER_AGENT_TOKEN={result['agent_token']}"])
     env_path.write_text("\n".join(retained).rstrip() + "\n")
     env_path.chmod(0o600)
-    print(f"Caller paired for installation {result['installation_id']}. Credential stored in {env_path}; restart the supervised agent gateway safely.")
+    if args.profile:
+        print(
+            f"Caller paired profile '{args.profile}' for installation {result['installation_id']}. "
+            f"Credential stored in {env_path}. Use call.py --profile {args.profile} for this phone and run "
+            f"voice_connector.py install --profile {args.profile} to enable live voice."
+        )
+    else:
+        print(f"Caller paired for installation {result['installation_id']}. Credential stored in {env_path}; restart the supervised agent gateway safely.")
     return 0
 
 

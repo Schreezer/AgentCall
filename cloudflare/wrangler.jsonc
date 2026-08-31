@@ -25,8 +25,11 @@
     "AUDIO_MAX_BYTES": "5000000",
     "AUDIO_TTL_SECONDS": "3600",
     "LIVE_VOICE_ENABLED": "true",
+    "LIVE_VOICE_BACKEND": "hermes_connector",
+    "LIVE_VOICE_PROVIDER": "auto",
     "XAI_VOICE_MODEL": "grok-voice-think-fast-2.0",
     "XAI_VOICE": "eve",
+    "CODEX_VOICE": "sol",
     "HERMES_VOICE_TOOLSETS": "web,session_search"
   },
   "secrets": {
@@ -59,6 +62,10 @@
       {
         "name": "HERMES_COORDINATOR",
         "class_name": "HermesInstallationCoordinator"
+      },
+      {
+        "name": "VOICE_CONNECTOR",
+        "class_name": "VoiceConnector"
       }
     ]
   },
@@ -70,6 +77,10 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["HermesInstallationCoordinator"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["VoiceConnector"]
     }
   ],
   "workflows": [

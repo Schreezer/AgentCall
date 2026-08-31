@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { APNsClient } from "./apns.js";
 import { audioObjectKey } from "./core.js";
+import { connectorRequest } from "./voice-connector-client.js";
 
 const DUE_BATCH_SIZE = 100;
 const CLEANUP_BATCH_SIZE = 100;
@@ -103,6 +104,12 @@ export class RelayScheduler extends DurableObject {
 
       if (!device) {
         await this.markFailed(claimed.id, ["No registered devices"]);
+        continue;
+      }
+
+      const prewarm = await prewarmLiveCallAgent(this.env, installationID, claimed);
+      if (!prewarm.ok) {
+        await this.markFailed(claimed.id, [`Voice agent prewarm failed: ${prewarm.error}`]);
         continue;
       }
 
@@ -241,5 +248,27 @@ export class RelayScheduler extends DurableObject {
       return;
     }
     await this.ctx.storage.setAlarm(Math.max(Number(next.due_at), Date.now() + 100));
+  }
+}
+
+export async function prewarmLiveCallAgent(env, installationID, call) {
+  if (call.mode !== "live_voice") return { ok: true, skipped: true };
+  if (String(env.LIVE_VOICE_BACKEND || "legacy").toLowerCase() !== "hermes_connector") {
+    return { ok: true, skipped: true };
+  }
+  const requested = String(env.LIVE_VOICE_PROVIDER || "auto").toLowerCase();
+  const preferredProvider = ["codex", "xai"].includes(requested) ? requested : null;
+  try {
+    const result = await connectorRequest(env, installationID, {
+      type: "voice.session.prepare",
+      prepare_id: call.id,
+      preferred_provider: preferredProvider,
+    });
+    if (!result?.ok) {
+      return { ok: false, error: result?.error ?? "hermes_voice_connector_failed" };
+    }
+    return { ok: true, provider: result.provider };
+  } catch {
+    return { ok: false, error: "hermes_voice_connector_failed" };
   }
 }

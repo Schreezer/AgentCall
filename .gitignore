@@ -17,3 +17,7 @@ cloudflare/node_modules/
 # Machine-specific deployment notes and overrides
 MAC_TEST_DEPLOYMENT.md
 Local.xcconfig
+
+# Python bytecode
+__pycache__/
+*.pyc

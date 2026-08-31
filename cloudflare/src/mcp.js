@@ -24,13 +24,10 @@ function createHermesMcpServer(env, scope, requestID) {
     {
       title: "Ask Hermes",
       description:
-        "Consult Hermes using an explicit context boundary. Use origin only for work directly related to " +
-        "the reason for this call; use independent for a different topic or task. Reuse the same " +
-        "independent_context key for follow-ups to one independent task, and use a new key for another task. " +
-        "Never ask the user to choose among Hermes sessions or mention internal sessions. " +
-        "This call returns queued immediately. Caller then delivers later status changes and the final result " +
-        "to this conversation automatically. Do not call check_hermes_task unless the user explicitly asks " +
-        "for a status check or Caller reports that automatic event delivery is unavailable.",
+        "Consult Hermes for memory, research, or reasoning. Use origin for this call's briefing or " +
+        "originating work. Use independent with a stable independent_context for unrelated work, and " +
+        "reuse that key for follow-ups. The request queues immediately; results arrive as " +
+        "caller_hermes_event. Keep internal sessions private.",
       inputSchema: {
         request: z.string().trim().min(1).max(8_000).describe("A complete standalone request for Hermes."),
         context_scope: z.enum(["origin", "independent"]).describe(
@@ -42,69 +39,25 @@ function createHermesMcpServer(env, scope, requestID) {
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
-    async (args) => {
-      if (args.context_scope === "independent" && !args.independent_context) {
-        return toolError("independent_context_required");
-      }
-      if (args.context_scope === "origin" && args.independent_context) {
-        return toolError("independent_context_not_allowed_for_origin");
-      }
-      const replayKey = await hashCredential(`${scope.id}:ask_hermes:${requestID}`);
-      const requestHash = await hashCredential(stableStringify(args));
-      const coordinator = env.HERMES_COORDINATOR.getByName(scope.installation_id);
-      try {
-        const accepted = await coordinator.acceptOperation({
-          installationID: scope.installation_id,
-          callID: scope.call_id,
-          voiceSessionID: scope.id,
-          replayKey,
-          requestHash,
-          request: args.request,
-          sessionMode: args.context_scope === "independent" ? "independent" : "active",
-          sessionID: null,
-          contextKey: args.independent_context ?? null,
-          originHermesSessionID: scope.origin_hermes_session_id,
-          activeHermesSessionID: scope.origin_hermes_session_id,
-          enabledToolsets: configuredVoiceToolsets(env),
-        });
-        return toolResult({ ...accepted, completion_delivery: "caller_events" });
-      } catch (error) {
-        return toolError(error?.message ?? String(error));
-      }
-    },
+    async (args) => mcpToolResult(await executeHermesTool(env, scope, requestID, "ask_hermes", args)),
   );
   server.registerTool(
     "check_hermes_task",
     {
       title: "Check Hermes task",
-      description: "Check a previously accepted Hermes operation. Use only an operation_id returned to this voice session.",
+      description:
+        "Check an operation from this voice session only when the caller asks for status or Caller reports event delivery failed.",
       inputSchema: {
         operation_id: z.string().regex(/^voiceop_[0-9a-f]{32}$/),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     },
-    async ({ operation_id: operationID }) => {
-      const operation = await env.DB.prepare(
-        `SELECT voice_session_id FROM hermes_operations
-          WHERE id = ?1 AND installation_id = ?2`,
-      ).bind(operationID, scope.installation_id).first();
-      const grants = parseStringArray(scope.granted_operation_ids_json);
-      const allowed = operation && (operation.voice_session_id === scope.id || grants.includes(operationID));
-      if (!allowed) return toolError("hermes_operation_not_allowed");
-      try {
-        const result = await env.HERMES_COORDINATOR
-          .getByName(scope.installation_id)
-          .operationStatus(operationID);
-        return toolResult(result);
-      } catch (error) {
-        return toolError(error?.message ?? String(error));
-      }
-    },
+    async (args) => mcpToolResult(await executeHermesTool(env, scope, requestID, "check_hermes_task", args)),
   );
   return server;
 }
 
-async function authorizeMcp(request, env) {
+export async function authorizeMcp(request, env) {
   const token = bearerToken(request);
   if (!token) return null;
   const hash = await hashCredential(token);
@@ -114,6 +67,86 @@ async function authorizeMcp(request, env) {
   )
     .bind(hash, Date.now())
     .first();
+}
+
+export async function executeHermesTool(env, scope, requestID, name, args) {
+  if (name === "ask_hermes") {
+    const error = validateAskHermes(args);
+    if (error) return { ok: false, error };
+    const replayKey = await hashCredential(`${scope.id}:ask_hermes:${requestID}`);
+    const requestHash = await hashCredential(stableStringify(args));
+    const coordinator = env.HERMES_COORDINATOR.getByName(scope.installation_id);
+    try {
+      const accepted = await coordinator.acceptOperation({
+        installationID: scope.installation_id,
+        callID: scope.call_id,
+        voiceSessionID: scope.id,
+        replayKey,
+        requestHash,
+        request: args.request,
+        sessionMode: args.context_scope === "independent" ? "independent" : "active",
+        sessionID: null,
+        contextKey: args.independent_context ?? null,
+        originHermesSessionID: scope.origin_hermes_session_id,
+        activeHermesSessionID: scope.origin_hermes_session_id,
+        enabledToolsets: configuredVoiceToolsets(env),
+      });
+      return { ok: true, value: { ...accepted, completion_delivery: "caller_events" } };
+    } catch (error) {
+      return { ok: false, error: error?.message ?? String(error) };
+    }
+  }
+
+  if (name === "check_hermes_task") {
+    const operationID = args?.operation_id;
+    if (
+      !args ||
+      typeof args !== "object" ||
+      Object.keys(args).some((key) => key !== "operation_id") ||
+      typeof operationID !== "string" ||
+      !/^voiceop_[0-9a-f]{32}$/.test(operationID)
+    ) {
+      return { ok: false, error: "invalid_operation_id" };
+    }
+    const operation = await env.DB.prepare(
+      `SELECT voice_session_id FROM hermes_operations
+        WHERE id = ?1 AND installation_id = ?2`,
+    ).bind(operationID, scope.installation_id).first();
+    const grants = parseStringArray(scope.granted_operation_ids_json);
+    const allowed = operation && (operation.voice_session_id === scope.id || grants.includes(operationID));
+    if (!allowed) return { ok: false, error: "hermes_operation_not_allowed" };
+    try {
+      const value = await env.HERMES_COORDINATOR
+        .getByName(scope.installation_id)
+        .operationStatus(operationID);
+      return { ok: true, value };
+    } catch (error) {
+      return { ok: false, error: error?.message ?? String(error) };
+    }
+  }
+
+  return { ok: false, error: "unsupported_tool" };
+}
+
+function validateAskHermes(args) {
+  if (!args || typeof args !== "object") return "invalid_arguments";
+  if (Object.keys(args).some(
+    (key) => !["request", "context_scope", "independent_context"].includes(key),
+  )) return "unknown_argument";
+  if (typeof args.request !== "string" || !args.request.trim() || args.request.length > 8_000) {
+    return "invalid_request";
+  }
+  if (!["origin", "independent"].includes(args.context_scope)) return "invalid_context_scope";
+  if (args.context_scope === "independent" && !args.independent_context) {
+    return "independent_context_required";
+  }
+  if (args.context_scope === "origin" && args.independent_context) {
+    return "independent_context_not_allowed_for_origin";
+  }
+  if (args.independent_context && !/^[a-z0-9][a-z0-9_-]{0,79}$/.test(args.independent_context)) {
+    return "invalid_independent_context";
+  }
+  return null;
 }
 
 async function parsedBody(request) {
@@ -164,6 +197,10 @@ function toolError(message) {
     isError: true,
     content: [{ type: "text", text: JSON.stringify({ error: message }) }],
   };
+}
+
+function mcpToolResult(result) {
+  return result.ok ? toolResult(result.value) : toolError(result.error);
 }
 
 function mcpError(status, id, code, message) {

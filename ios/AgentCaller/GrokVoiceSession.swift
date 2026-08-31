@@ -4,11 +4,11 @@ import OSLog
 @MainActor
 final class GrokVoiceSession {
     var onFailure: ((Error) -> Void)?
+    var onReady: (() -> Void)?
 
     private let logger = Logger(subsystem: "com.chirag.agentcaller", category: "GrokVoice")
     private let audio = RealtimeAudioEngine()
     private var bootstrapClient: VoiceBootstrapClient?
-    private var bootstrapTask: Task<Void, Never>?
     private var receiveTask: Task<Void, Never>?
     private var operationEventsTask: Task<Void, Never>?
     private var socket: URLSessionWebSocketTask?
@@ -19,32 +19,22 @@ final class GrokVoiceSession {
     private var stopped = false
     private var responseGate = GrokResponseGate()
 
-    func start(callID: UUID, client: VoiceBootstrapClient) {
+    func start(
+        bootstrap: VoiceBootstrap,
+        client: VoiceBootstrapClient,
+        callID: UUID
+    ) throws {
         stop(revoke: false)
         stopped = false
         responseGate = GrokResponseGate()
         activeCallID = callID
         bootstrapClient = client
-        bootstrapTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                let bootstrap = try await client.create(callID: callID)
-                try Task.checkCancellation()
-                guard self.activeCallID == callID, !self.stopped else { return }
-                self.voiceSessionID = bootstrap.voiceSessionID
-                try self.connect(bootstrap)
-            } catch is CancellationError {
-                return
-            } catch {
-                self.fail(error)
-            }
-        }
+        voiceSessionID = bootstrap.voiceSessionID
+        try connect(bootstrap)
     }
 
     func stop(revoke: Bool = true) {
         stopped = true
-        bootstrapTask?.cancel()
-        bootstrapTask = nil
         receiveTask?.cancel()
         receiveTask = nil
         operationEventsTask?.cancel()
@@ -68,8 +58,9 @@ final class GrokVoiceSession {
     }
 
     private func connect(_ bootstrap: VoiceBootstrap) throws {
+        guard let xai = bootstrap.xai else { throw VoiceBootstrapError.invalidResponse }
         var components = URLComponents(string: "wss://api.x.ai/v1/realtime")!
-        components.queryItems = [URLQueryItem(name: "model", value: bootstrap.xai.model)]
+        components.queryItems = [URLQueryItem(name: "model", value: xai.model)]
         guard let url = components.url else { throw VoiceBootstrapError.invalidResponse }
         let delegate = GrokSocketDelegate { [weak self] in
             Task { @MainActor in self?.socketOpened(bootstrap) }
@@ -82,7 +73,7 @@ final class GrokVoiceSession {
         let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
         let socket = session.webSocketTask(
             with: url,
-            protocols: ["xai-client-secret.\(bootstrap.xai.ephemeralToken)"]
+            protocols: ["xai-client-secret.\(xai.ephemeralToken)"]
         )
         self.socketDelegate = delegate
         self.urlSession = session
@@ -93,12 +84,14 @@ final class GrokVoiceSession {
 
     private func socketOpened(_ bootstrap: VoiceBootstrap) {
         do {
-            let sessionObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(bootstrap.session))
+            guard let session = bootstrap.session else { throw VoiceBootstrapError.invalidResponse }
+            let sessionObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(session))
             try sendJSON(["type": "session.update", "session": sessionObject])
             try audio.start { [weak self] data in
                 Task { @MainActor in self?.socket?.send(.data(data)) { _ in } }
             }
             startHermesEventLoop()
+            onReady?()
         } catch {
             fail(error)
         }

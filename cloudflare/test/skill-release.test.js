@@ -4,12 +4,17 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { releaseMetadata, withSkillReleaseHeaders } from "../src/skill-release.js";
 
+const releaseSource = JSON.parse(readFileSync(
+  new URL("../../integrations/hermes/urgent-caller/release.json", import.meta.url),
+  "utf8",
+));
+
 test("ships a complete hash-verified and Ed25519-signed urgent-caller release", () => {
   const release = releaseMetadata();
   assert.equal(release.manifest.skill_name, "urgent-caller");
-  assert.equal(release.manifest.skill_version, "0.4.3");
-  assert.equal(release.manifest.change_class, "compatible");
-  assert.equal(release.manifest.requires_user_approval, false);
+  assert.equal(release.manifest.skill_version, releaseSource.skill_version);
+  assert.equal(release.manifest.change_class, releaseSource.change_class);
+  assert.equal(release.manifest.requires_user_approval, releaseSource.requires_user_approval);
 
   for (const entry of release.manifest.files) {
     const content = release.files[entry.path];
@@ -44,7 +49,7 @@ test("ships a complete hash-verified and Ed25519-signed urgent-caller release", 
 });
 
 test("advertises compatible, available, and required skill update states", async () => {
-  const current = withSkillReleaseHeaders(new Response("ok"), requestWithVersion("0.4.3"));
+  const current = withSkillReleaseHeaders(new Response("ok"), requestWithVersion(releaseSource.skill_version));
   assert.equal(current.headers.get("x-caller-skill-update"), "current");
 
   const available = withSkillReleaseHeaders(new Response("ok"), requestWithVersion("0.3.0"));

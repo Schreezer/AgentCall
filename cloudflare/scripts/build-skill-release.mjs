@@ -51,7 +51,14 @@ const bootstrap = readFileSync(join(skillRoot, "bootstrap.py"), "utf8");
 if (!bootstrap.includes(publicKeyPEM.trimEnd())) {
   throw new Error("bootstrap.py does not pin the public key for the configured release signing key");
 }
-const sourceFiles = ["SKILL.md", "release.json", "scripts/call.py", "scripts/pair.py", "scripts/update.py"];
+const sourceFiles = [
+  "SKILL.md",
+  "release.json",
+  "scripts/call.py",
+  "scripts/pair.py",
+  "scripts/update.py",
+  "scripts/voice_connector.py",
+];
 const files = {};
 const fileEntries = [];
 
@@ -140,7 +147,14 @@ async function checkGeneratedReleaseWithoutPrivateKey() {
   const fingerprint = sha256(verificationKey.export({ format: "der", type: "spki" }));
   const expectedFiles = {};
   const expectedEntries = [];
-  for (const relativePath of ["SKILL.md", "release.json", "scripts/call.py", "scripts/pair.py", "scripts/update.py"]) {
+  for (const relativePath of [
+    "SKILL.md",
+    "release.json",
+    "scripts/call.py",
+    "scripts/pair.py",
+    "scripts/update.py",
+    "scripts/voice_connector.py",
+  ]) {
     const content = readFileSync(join(skillRoot, relativePath), "utf8");
     expectedFiles[relativePath] = content;
     expectedEntries.push({

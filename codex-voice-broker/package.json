@@ -1,0 +1,13 @@
+{
+  "name": "agentcaller-codex-voice-broker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test"
+  }
+}

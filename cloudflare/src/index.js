@@ -19,9 +19,11 @@ import {
 import { RelayScheduler } from "./scheduler.js";
 import { HermesInstallationCoordinator } from "./hermes-installation-coordinator.js";
 import { HermesOperationWorkflow } from "./hermes-operation-workflow.js";
-import { handleMcp } from "./mcp.js";
+import { VoiceConnector } from "./voice-connector.js";
+import { authorizeMcp, executeHermesTool, handleMcp } from "./mcp.js";
 import {
   createVoiceBootstrap,
+  answerVoiceSession,
   diagnoseVoiceProvider,
   revokeVoiceSession,
 } from "./voice-bootstrap.js";
@@ -33,9 +35,10 @@ import {
   withSkillReleaseHeaders,
 } from "./skill-release.js";
 
-export { RelayScheduler, HermesInstallationCoordinator, HermesOperationWorkflow };
+export { RelayScheduler, HermesInstallationCoordinator, HermesOperationWorkflow, VoiceConnector };
 
 const JSON_BODY_LIMIT = 16_384;
+const VOICE_BOOTSTRAP_BODY_LIMIT = 160_000;
 const DEFAULT_AUDIO_MAX_BYTES = 5_000_000;
 const DEFAULT_AUDIO_TTL_SECONDS = 3_600;
 const DEFAULT_PAIRING_TTL_SECONDS = 900;
@@ -86,6 +89,46 @@ async function route(request, env, context) {
   }
 
   if (url.pathname === "/mcp") return handleMcp(request, env, context);
+
+  const codexToolMatch = url.pathname.match(
+    /^\/v1\/codex-tools\/([0-9a-f-]+)\/call$/i,
+  );
+  if (request.method === "POST" && codexToolMatch) {
+    const scope = await authorizeCodexToolRequest(request, env, codexToolMatch[1]);
+    if (!scope) return json(401, { error: "invalid_codex_tool_credential" });
+    const body = await readJSON(request);
+    if (typeof body.request_id !== "string" || body.request_id.length > 256) {
+      return json(400, { error: "valid_request_id_required" });
+    }
+    const result = await executeHermesTool(
+      env,
+      scope,
+      body.request_id,
+      body.name,
+      body.arguments,
+    );
+    return json(200, {
+      success: result.ok,
+      contentItems: [{
+        type: "inputText",
+        text: JSON.stringify(result.ok ? result.value : { error: result.error }),
+      }],
+    }, { "cache-control": "no-store" });
+  }
+
+  const codexEventsMatch = url.pathname.match(
+    /^\/v1\/codex-tools\/([0-9a-f-]+)\/events$/i,
+  );
+  if (request.method === "GET" && codexEventsMatch) {
+    const scope = await authorizeCodexToolRequest(request, env, codexEventsMatch[1]);
+    if (!scope) return json(401, { error: "invalid_codex_tool_credential" });
+    return listHermesOperationEvents(
+      env,
+      scope.installation_id,
+      scope.id,
+      url.searchParams.get("after"),
+    );
+  }
 
   if (request.method === "POST" && url.pathname === "/v1/installations") {
     if (!(await allowRate(env, `install:${clientIP(request)}`, 20))) return rateLimited();
@@ -154,7 +197,20 @@ async function route(request, env, context) {
     const installation = await authorizeInstallation(env, bootstrapMatch[1], bearerToken(request));
     if (!installation) return json(401, { error: "invalid_installation_credential" });
     if (!(await allowRate(env, `voice-bootstrap:${installation.id}`, 10))) return rateLimited();
-    return createVoiceBootstrap(request, env, installation, bootstrapMatch[2]);
+    const body = await readJSON(request, VOICE_BOOTSTRAP_BODY_LIMIT);
+    return createVoiceBootstrap(request, env, installation, bootstrapMatch[2], body);
+  }
+
+  const voiceAnsweredMatch = url.pathname.match(
+    /^\/v1\/installations\/([0-9a-f-]+)\/voice-sessions\/([0-9a-f-]+)\/answered$/i,
+  );
+  if (request.method === "POST" && voiceAnsweredMatch) {
+    const installation = await authorizeInstallation(env, voiceAnsweredMatch[1], bearerToken(request));
+    if (!installation) return json(401, { error: "invalid_installation_credential" });
+    const result = await answerVoiceSession(env, installation.id, voiceAnsweredMatch[2]);
+    return result.ok
+      ? new Response(null, { status: 204, headers: { "cache-control": "no-store" } })
+      : json(result.status, { error: result.error });
   }
 
   const revokeMatch = url.pathname.match(
@@ -258,13 +314,24 @@ async function route(request, env, context) {
   const installation = await authorizeAgent(env, bearerToken(request));
   if (!installation) return json(401, { error: "invalid_agent_credential" });
 
+  if (request.method === "GET" && url.pathname === "/v1/agent-connect") {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return json(426, { error: "websocket_upgrade_required" });
+    }
+    return env.VOICE_CONNECTOR.getByName(installation.id).fetch(
+      new Request("https://voice-connector.internal/connect", {
+        headers: { upgrade: "websocket" },
+      }),
+    );
+  }
+
   if (request.method === "GET" && url.pathname === "/v1/agent-package/urgent-caller/manifest") {
     return skillManifestResponse(request);
   }
 
   if (request.method === "POST" && url.pathname === "/v1/agent-diagnostics/live-voice") {
     if (!(await allowRate(env, `voice-diagnostic:${installation.id}`, 3))) return rateLimited();
-    return diagnoseVoiceProvider(env);
+    return diagnoseVoiceProvider(env, installation.id);
   }
 
   const skillFileMatch = url.pathname.match(
@@ -801,18 +868,25 @@ async function runMaintenance(env) {
   );
 }
 
-async function readJSON(request) {
+async function readJSON(request, maxBytes = JSON_BODY_LIMIT) {
   const contentLength = Number.parseInt(request.headers.get("content-length") ?? "0", 10);
-  if (Number.isFinite(contentLength) && contentLength > JSON_BODY_LIMIT) {
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
     throw codedError("body_too_large", 413);
   }
-  const bytes = await readBoundedBytes(request, JSON_BODY_LIMIT, "body_too_large");
+  const bytes = await readBoundedBytes(request, maxBytes, "body_too_large");
   const text = new TextDecoder().decode(bytes);
   try {
     return JSON.parse(text || "{}");
   } catch {
     throw codedError("invalid_json", 400);
   }
+}
+
+async function authorizeCodexToolRequest(request, env, voiceSessionID) {
+  const scope = await authorizeMcp(request, env);
+  return scope && scope.id === voiceSessionID.toLowerCase() && scope.provider === "codex"
+    ? scope
+    : null;
 }
 
 async function readBoundedBytes(request, maxBytes, tooLargeError) {

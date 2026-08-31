@@ -67,11 +67,13 @@ test("validates and normalizes a live Hermes voice call", () => {
       relevant_context: "Option A is cheaper; option B is faster",
       desired_outcome: "Choose A or B",
       urgency: "important",
+      opening_question: "Which option should Hermes continue with?",
     },
     origin_hermes_session_id: "session-123",
   });
   assert.equal(result.value.mode, "live_voice");
   assert.equal(result.value.callContext.reason, "A choice is time sensitive");
+  assert.equal(result.value.callContext.opening_question, "Which option should Hermes continue with?");
   assert.equal(result.value.originHermesSessionID, "session-123");
   assert.equal(
     validateCall({ mode: "live_voice", message: "missing briefing" }).error,

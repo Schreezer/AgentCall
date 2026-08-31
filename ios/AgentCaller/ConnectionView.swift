@@ -10,6 +10,7 @@ struct ConnectionView: View {
     @EnvironmentObject private var configuration: ConnectionConfiguration
     @Environment(\.colorScheme) private var colorScheme
     @State private var didCopyInstructions = false
+    @State private var didCopyFamilyInstructions = false
     @State private var didCopyUpdateInstructions = false
     @State private var isShowingSettings = false
     @State private var now = Date()
@@ -208,6 +209,13 @@ struct ConnectionView: View {
 
             copyInstructionsButton
 
+            copyFamilyInstructionsButton
+
+            Text("Setting this phone up for a parent or another family member? Copy the family instructions instead and paste them into your own agent.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
             HStack(spacing: 9) {
                 ProgressView()
                     .controlSize(.small)
@@ -392,6 +400,35 @@ struct ConnectionView: View {
                 .buttonStyle(.borderedProminent)
                 .buttonBorderShape(.roundedRectangle(radius: 17))
         }
+    }
+
+    @ViewBuilder
+    private var copyFamilyInstructionsButton: some View {
+        let button = Button {
+            guard configuration.hasUsablePairingCode(at: now) else { return }
+            UIPasteboard.general.string = AgentSetupInstructions.familyText(
+                relayURL: configuration.relayURL,
+                pairingCode: configuration.pairingCode
+            )
+            didCopyFamilyInstructions = true
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                didCopyFamilyInstructions = false
+            }
+        } label: {
+            Label(
+                didCopyFamilyInstructions ? "Family instructions copied" : "Set up for a family member",
+                systemImage: didCopyFamilyInstructions ? "checkmark" : "figure.2"
+            )
+            .font(.headline)
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: 52)
+        }
+        .accessibilityIdentifier("copy-family-instructions-button")
+
+        button
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle(radius: 17))
     }
 
     @ViewBuilder

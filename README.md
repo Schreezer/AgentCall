@@ -2,7 +2,7 @@
 
 AgentCall lets a personal AI agent place an incoming voice call to an iPhone when a message cannot wait. It combines a native SwiftUI app, PushKit and CallKit, a small APNs relay, and a reference skill for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-The relay can speak a text message, play a short supplied audio file, or place a live two-way xAI Grok voice call. During a live call, xAI invokes an authenticated Remote MCP endpoint on the Cloudflare Worker; the Worker reaches Hermes privately by session ID and Grok decides how to speak the returned result.
+The relay can speak a text message, play a short supplied audio file, or place a live two-way voice call. Live voice reuses credentials already owned by the paired Hermes host: its OpenAI Codex credential pool or its xAI API key. Caller never asks the user for either credential.
 
 > [!IMPORTANT]
 > Apple documents PushKit VoIP notifications for initiating live voice calls. Treat the prerecorded-message implementation as an MVP and development tool. A production App Store version should use ordinary or time-sensitive notifications for one-way reminders and reserve PushKit/CallKit for a real, bidirectional voice session.
@@ -22,10 +22,10 @@ Hermes / OpenClaw / another agent
               |
               | CallKit incoming-call UI
               v
-     User answers -> TTS, uploaded audio, or live Grok voice
+     User answers -> TTS, uploaded audio, or live AI voice
 ```
 
-In live mode, microphone and playback audio travel directly between the iPhone and xAI using a short-lived token. Tool calls travel separately from xAI to the Worker's `/mcp` endpoint, then through a Workers VPC Service and the existing outbound Cloudflare Tunnel to Hermes on loopback. There is no separate AWS voice-bridge application, and the app contains no permanent xAI or Hermes credential.
+The signed Hermes connector opens an authenticated outbound WebSocket to an installation-scoped Worker Durable Object, so the Hermes host needs no inbound port. For xAI it mints a short-lived client secret locally; microphone and playback audio then travel directly between the iPhone and xAI. For Codex it selects Hermes's `openai-codex` pool entry, supplies it to the official local app-server through `chatgptAuthTokens`, and answers refresh requests through Hermes's existing refresh lock. Only the SDP answer crosses the Worker. Hermes tool calls use a separate call-scoped path. The app and Worker contain no permanent xAI or OpenAI credential.
 
 The end user's agent never receives Apple developer credentials or the phone's PushKit token. It stores only a revocable token scoped to one paired app installation. The developer-operated relay retains the APNs Team ID, Key ID, and `.p8` signing key.
 
@@ -38,7 +38,8 @@ For the complete trust model and request lifecycle, see [ARCHITECTURE.md](ARCHIT
 | `ios/AgentCaller` | Native SwiftUI app, pairing UI, PushKit registration, CallKit handling, and audio playback |
 | `backend` | Local Node.js relay for development and compatibility testing |
 | `cloudflare` | Durable Cloudflare Worker relay using D1, R2, and a Durable Object scheduler |
-| `integrations/hermes/urgent-caller` | Signed, versioned Hermes skill with pairing, call, live-Grok briefing, and managed-update clients |
+| `codex-voice-broker` | Legacy rollback bridge for Worker-initiated Codex app-server realtime WebRTC |
+| `integrations/hermes/urgent-caller` | Signed Hermes skill with pairing, calls, managed updates, and the outbound voice connector |
 | `HERMES_CALLER_SETUP_PROMPT.md` | Self-contained instructions that the iOS app can give to a user's agent |
 | `MAC_TEST_DEPLOYMENT.md` | Temporary Mac-hosted relay and physical-device testing notes |
 
@@ -102,10 +103,11 @@ The `cloudflare` implementation preserves the same HTTP API while replacing loca
 - A Durable Object alarm delivers scheduled calls and removes expired audio.
 - Worker secrets hold the APNs Team ID, Key ID, and `.p8` signing key.
 - A second Durable Object plus a Workflow coordinate session-scoped Hermes operations.
-- `/mcp` exposes only `ask_hermes` and `check_hermes_task` to xAI. `ask_hermes`
+- An installation-scoped `VoiceConnector` Durable Object rendezvouses with the Hermes host's outbound WebSocket and keeps only sanitized provider readiness.
+- `/mcp` exposes only `ask_hermes` and `check_hermes_task` to xAI; the private Codex bridge exposes the same two operations. `ask_hermes`
   returns `queued` immediately. Each later status transition is appended to D1; the authenticated
-  iOS call session reads that feed and inserts the status or final answer into the active Grok
-  conversation automatically. Explicit checking is only for user-requested diagnostics.
+  active voice session reads that feed and inserts the status or final answer into the conversation
+  automatically. Explicit checking is only for user-requested diagnostics.
 - A Workers VPC Service reaches the existing Hermes API without publishing port 8642.
 
 Create the resources:
@@ -122,7 +124,6 @@ Wrangler automatically provisions the D1 database and R2 bucket declared in `clo
 npx wrangler secret put APNS_TEAM_ID
 npx wrangler secret put APNS_KEY_ID
 npx wrangler secret put APNS_PRIVATE_KEY
-npx wrangler secret put XAI_API_KEY
 npx wrangler secret put HERMES_API_KEY
 ```
 
@@ -206,7 +207,7 @@ python3 scripts/call.py \
 
 Use a stable, event-specific idempotency key. Retrying the same event with the same key will not create duplicate calls.
 
-### Place a live Grok call
+### Place a live voice call
 
 Use live mode when Hermes needs a discussion or decision tied to the active session:
 
@@ -221,7 +222,7 @@ python3 scripts/call.py \
   --idempotency-key "flight-decision-2026-08-03"
 ```
 
-Hermes supplies `HERMES_SESSION_ID`. The relay gives Grok the structured briefing and fresh governing instructions when the call is answered; Grok can consult the signed originating Hermes session through `ask_hermes` rather than receiving a large or guessed context dump.
+Hermes supplies `HERMES_SESSION_ID`. The relay gives the selected voice provider the structured briefing and fresh governing instructions when the call is answered. The provider can consult the signed originating Hermes session through `ask_hermes` rather than receiving a large or guessed context dump. See [`codex-voice-broker/README.md`](codex-voice-broker/README.md) to enable the Codex provider; `LIVE_VOICE_PROVIDER` intentionally remains `xai` until the private broker and diagnostic are configured.
 
 ### Place a call with an audio file
 

@@ -10,10 +10,13 @@ This is the durable deployment target for AgentCall. In addition to the message/
 | `AUDIO` | R2 audio objects |
 | `SCHEDULER` | Per-installation Durable Object alarm for due calls and audio cleanup |
 | `HERMES_COORDINATOR` | Per-installation ordering, session grants, operation projection, and reconciliation |
+| `VOICE_CONNECTOR` | Installation-scoped outbound WebSocket rendezvous and sanitized provider readiness |
 | `HERMES_WORKFLOW` | Durable Hermes submission, polling, approval wait, and completion handling |
 | `HERMES_PRIVATE` | Workers VPC Service bound through Cloudflare Tunnel to Hermes on `127.0.0.1:8642` |
 
-`APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_PRIVATE_KEY`, `XAI_API_KEY`, and `HERMES_API_KEY` must be Worker secrets. Permanent xAI and Hermes credentials must never be shipped in the iOS app. `APNS_BUNDLE_ID` is a non-secret variable in `wrangler.jsonc`.
+`APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_PRIVATE_KEY`, and `HERMES_API_KEY` must be Worker secrets. Permanent xAI and Codex credentials stay on the paired Hermes host and must never be shipped in the Worker or iOS app. `APNS_BUNDLE_ID` is a non-secret variable in `wrangler.jsonc`.
+
+`LIVE_VOICE_BACKEND=hermes_connector` is the primary path. The signed skill opens `/v1/agent-connect` from the Hermes host, reports only boolean provider readiness, and handles each bootstrap locally. `LIVE_VOICE_PROVIDER=auto` prefers Codex and falls back to xAI when only xAI is configured. Set `LIVE_VOICE_BACKEND=legacy` only for rollback to the older Worker xAI/public Codex broker configuration; no automatic fallback can move a permanent credential into Worker storage.
 
 The Worker also serves the signed `urgent-caller` release. `bootstrap.py` is public but pinned by SHA-256 in the iOS setup prompt; manifests and release files require the installation-scoped agent token. Build artifacts are signed offline with the Ed25519 private key at `.secrets/caller-release-ed25519.pem` or `CALLER_RELEASE_SIGNING_KEY`. Only the public key and signed generated release are committed. Back up the private signing key securely before relying on managed production updates.
 
