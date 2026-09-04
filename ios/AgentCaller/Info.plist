@@ -22,8 +22,12 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>CallerRelayURL</key>
 	<string>https://agentcall-relay.chiragmgg.workers.dev</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Caller may use the camera for video during a live call and will always ask first.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Caller uses the microphone only during a live conversation with your agent.</string>
 	<key>UIBackgroundModes</key>

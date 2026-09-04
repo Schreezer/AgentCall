@@ -22,7 +22,7 @@ import urllib.request
 import zlib
 
 PROTOCOL = 1
-SKILL_VERSION = "0.5.18"
+SKILL_VERSION = "0.5.19"
 USER_AGENT = f"Caller-Hermes-Connector/{SKILL_VERSION}"
 XAI_SECRET_URL = "https://api.x.ai/v1/realtime/client_secrets"
 MAX_MESSAGE_BYTES = 180_000

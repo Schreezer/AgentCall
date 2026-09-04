@@ -95,7 +95,7 @@ export class RelayScheduler extends DurableObject {
 
       await this.ctx.storage.setAlarm(Date.now() + DELIVERY_RECOVERY_MS);
       const device = await this.env.DB.prepare(
-        `SELECT device_token, environment
+        `SELECT device_token, alert_device_token, environment
            FROM installations
           WHERE id = ?1`,
       )
@@ -115,7 +115,9 @@ export class RelayScheduler extends DurableObject {
 
       let result;
       try {
-        result = await this.apns.sendVoIP(device, claimed);
+        result = claimed.mode === "live_voice"
+          ? await this.apns.sendVoIP(device, claimed)
+          : await this.apns.sendAlert(device, claimed);
       } catch (error) {
         await this.markFailed(claimed.id, [error?.message ?? String(error)]);
         continue;

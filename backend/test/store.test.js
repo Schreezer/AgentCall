@@ -13,6 +13,7 @@ function makeStore(options) {
 
 const device = {
   token: "a".repeat(64),
+  alert_token: "c".repeat(64),
   platform: "ios",
   environment: "sandbox",
   device_name: "iPhone",
@@ -97,9 +98,13 @@ test("worker delivers a due call only to its paired installation", async () => {
     scheduledAt: new Date(0).toISOString(),
   }, "go-now");
   const deliveries = [];
-  const apns = { configured: true, sendVoIP: async (registeredDevice, dueCall) => deliveries.push([registeredDevice.token, dueCall.id]) };
+  const apns = {
+    configured: true,
+    sendAlert: async (registeredDevice, dueCall) => deliveries.push([registeredDevice.alert_token, dueCall.id]),
+    sendVoIP: async () => { throw new Error("message must not use VoIP"); },
+  };
   const worker = new CallWorker(store, apns);
   await worker.tick();
-  assert.deepEqual(deliveries, [[device.token, call.id]]);
+  assert.deepEqual(deliveries, [[device.alert_token, call.id]]);
   assert.equal(store.getCall(call.id, target.id).status, "delivered");
 });

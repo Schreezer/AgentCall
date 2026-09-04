@@ -34,13 +34,12 @@ test("validates iOS device registration", () => {
   );
 });
 
-test("normalizes a call and preserves its audio attachment", () => {
+test("normalizes a one-way message notification", () => {
   const now = Date.parse("2026-07-27T12:00:00Z");
   const result = validateCall(
     {
       message: " Wake up ",
       caller_name: " PersonalClaw ",
-      audio_id: "123e4567-e89b-42d3-a456-426614174000",
       scheduled_at: "2026-07-27T12:01:00Z",
     },
     now,
@@ -49,7 +48,7 @@ test("normalizes a call and preserves its audio attachment", () => {
     value: {
       message: "Wake up",
       callerName: "PersonalClaw",
-      audioID: "123e4567-e89b-42d3-a456-426614174000",
+      audioID: null,
       scheduledAt: now + 60_000,
       mode: "message",
       callContext: null,
@@ -84,6 +83,10 @@ test("validates and normalizes a live Hermes voice call", () => {
 test("rejects invalid call and upload inputs", () => {
   assert.equal(validateCall({ message: "" }).error, "message_must_be_1_to_500_characters");
   assert.equal(validateCall({ message: "ok", scheduled_at: "later" }).error, "scheduled_at_must_be_iso_8601");
+  assert.equal(
+    validateCall({ message: "ok", audio_id: "123e4567-e89b-42d3-a456-426614174000" }).error,
+    "audio_delivery_is_not_supported",
+  );
   assert.equal(validIdempotencyKey("short"), false);
   assert.equal(validIdempotencyKey("stable-event-key"), true);
   assert.equal(normalizeAudioContentType(" Audio/MPEG; charset=binary "), "audio/mpeg");

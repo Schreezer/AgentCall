@@ -32,7 +32,12 @@ test("app registration, agent claim, and authorized call form one complete flow"
     const registration = await fetch(`${baseURL}/v1/installations`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: "c".repeat(64), platform: "ios", environment: "sandbox" }),
+      body: JSON.stringify({
+        token: "c".repeat(64),
+        alert_token: "e".repeat(64),
+        platform: "ios",
+        environment: "sandbox",
+      }),
     });
     assert.equal(registration.status, 201);
     const installation = await registration.json();
@@ -71,7 +76,7 @@ test("app registration, agent claim, and authorized call form one complete flow"
     const uploadedAudio = await upload.json();
     assert.match(uploadedAudio.audio_id, /^[0-9a-f-]{36}$/);
 
-    const call = await fetch(`${baseURL}/v1/calls`, {
+    const unsupportedAudioCall = await fetch(`${baseURL}/v1/calls`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${credential.agent_token}`,
@@ -84,10 +89,22 @@ test("app registration, agent claim, and authorized call form one complete flow"
         audio_id: uploadedAudio.audio_id,
       }),
     });
+    assert.equal(unsupportedAudioCall.status, 400);
+    assert.equal((await unsupportedAudioCall.json()).error, "audio_delivery_is_not_supported");
+
+    const call = await fetch(`${baseURL}/v1/calls`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${credential.agent_token}`,
+        "content-type": "application/json",
+        "idempotency-key": "api-flow-2",
+      },
+      body: JSON.stringify({ message: "This is urgent", caller_name: "Hermes" }),
+    });
     assert.equal(call.status, 202);
     const createdCall = await call.json();
     assert.equal(createdCall.status, "scheduled");
-    assert.equal(createdCall.has_audio, true);
+    assert.equal(createdCall.has_audio, false);
 
     const unauthorizedDownload = await fetch(
       `${baseURL}/v1/installations/${installation.installation_id}/audio/${uploadedAudio.audio_id}`,

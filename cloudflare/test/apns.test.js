@@ -30,8 +30,7 @@ test("sends the Worker-compatible APNs VoIP request and reuses its JWT", async (
     id: "123e4567-e89b-42d3-a456-426614174000",
     caller_name: "Hermes",
     message: "Wake up",
-    mode: "message",
-    audio_id: "audio-id",
+    mode: "live_voice",
   };
 
   await client.sendVoIP(device, call);
@@ -50,8 +49,7 @@ test("sends the Worker-compatible APNs VoIP request and reuses its JWT", async (
     call_id: call.id,
     caller_name: "Hermes",
     message: "Wake up",
-    mode: "message",
-    audio_id: "audio-id",
+    mode: "live_voice",
   });
   assert.equal(
     requests[0].init.headers.authorization,
@@ -73,6 +71,59 @@ test("sends the Worker-compatible APNs VoIP request and reuses its JWT", async (
       new TextEncoder().encode(`${header}.${claims}`),
     ),
     true,
+  );
+});
+
+test("sends one-way messages as standard APNs alerts", async () => {
+  const keys = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign", "verify"],
+  );
+  const privateKey = await crypto.subtle.exportKey("pkcs8", keys.privateKey);
+  const requests = [];
+  const client = new APNsClient({
+    APNS_TEAM_ID: "TEAMID1234",
+    APNS_KEY_ID: "KEYID12345",
+    APNS_PRIVATE_KEY: pem(privateKey),
+    APNS_BUNDLE_ID: "com.chirag.agentcaller",
+  }, {
+    fetcher: async (url, init) => {
+      requests.push({ url, init });
+      return new Response(null, { status: 200 });
+    },
+  });
+  const device = {
+    environment: "production",
+    device_token: "ab".repeat(32),
+    alert_device_token: "cd".repeat(32),
+  };
+  const message = {
+    id: "123e4567-e89b-42d3-a456-426614174000",
+    caller_name: "Hermes",
+    message: "Wake up",
+    mode: "message",
+  };
+
+  await client.sendAlert(device, message);
+
+  assert.equal(requests[0].url, `https://api.push.apple.com/3/device/${device.alert_device_token}`);
+  assert.equal(requests[0].init.headers["apns-topic"], "com.chirag.agentcaller");
+  assert.equal(requests[0].init.headers["apns-push-type"], "alert");
+  assert.deepEqual(JSON.parse(requests[0].init.body), {
+    aps: {
+      alert: { title: "Hermes - AI agent", body: "Wake up" },
+      sound: "default",
+      "thread-id": "agentcall-messages",
+    },
+    event: "agent_message",
+    message_id: message.id,
+    caller_name: "Hermes",
+  });
+  await assert.rejects(() => client.sendVoIP(device, message), /live voice/);
+  await assert.rejects(
+    () => client.sendAlert(device, { ...message, mode: "live_voice" }),
+    /VoIP delivery/,
   );
 });
 

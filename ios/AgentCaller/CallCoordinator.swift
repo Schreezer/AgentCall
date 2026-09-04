@@ -13,7 +13,6 @@ struct ActiveCallPresentation: Identifiable, Equatable {
     let id: UUID
     let callerName: String
     let connectedAt: Date
-    let isLiveVoice: Bool
 }
 
 struct CallAudioRouteOption: Identifiable, Equatable {
@@ -52,10 +51,7 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
     private let provider: CXProvider
     private let callController = CXCallController()
     private let logger = Logger(subsystem: "com.chirag.agentcaller", category: "CallKit")
-    private let speechSynthesizer = AVSpeechSynthesizer()
     private let connectionTone = ConnectionTone()
-    private var audioPlayer: AVAudioPlayer?
-    private var audioDownloadTask: Task<Void, Never>?
     private var calls: [UUID: IncomingCall] = [:]
     private var activeCallID: UUID?
     private var voiceSession: LiveVoiceSession?
@@ -78,7 +74,6 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
         provider = CXProvider(configuration: configuration)
         super.init()
         provider.setDelegate(self, queue: .main)
-        speechSynthesizer.delegate = self
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(audioRouteDidChange),
@@ -122,9 +117,7 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
                     print("CALLER_CALLKIT_REPORTED: \(call.id)")
                     #endif
                     self?.logger.info("Incoming call \(call.id, privacy: .public) reported successfully")
-                    if call.mode == .liveVoice {
-                        self?.prepareLiveVoice(for: call)
-                    }
+                    self?.prepareLiveVoice(for: call)
                 }
                 completion?()
             }
@@ -139,11 +132,6 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
         }
         voiceSession?.stop()
         voiceSession = nil
-        audioDownloadTask?.cancel()
-        audioDownloadTask = nil
-        audioPlayer?.stop()
-        audioPlayer = nil
-        speechSynthesizer.stopSpeaking(at: .immediate)
         calls.removeAll()
         activeCallID = nil
         resetCallPresentation()
@@ -155,22 +143,12 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
             return
         }
         do {
-            if call.mode == .liveVoice {
-                try LiveVoiceSession.configureAudioSession()
-            } else {
-                let session = AVAudioSession.sharedInstance()
-                try session.setCategory(
-                    CallAudioRoutePolicy.category,
-                    mode: CallAudioRoutePolicy.mode,
-                    options: CallAudioRoutePolicy.options
-                )
-            }
+            try LiveVoiceSession.configureAudioSession()
             activeCallID = call.id
             activeCall = ActiveCallPresentation(
                 id: call.id,
                 callerName: call.callerName,
-                connectedAt: Date(),
-                isLiveVoice: call.mode == .liveVoice
+                connectedAt: Date()
             )
             isMuted = false
             refreshAudioRoutes()
@@ -185,11 +163,6 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
         stopConnectionTone()
         voiceSession?.stop()
         voiceSession = nil
-        audioDownloadTask?.cancel()
-        audioDownloadTask = nil
-        audioPlayer?.stop()
-        audioPlayer = nil
-        speechSynthesizer.stopSpeaking(at: .immediate)
         calls.removeValue(forKey: action.callUUID)
         if activeCallID == action.callUUID {
             activeCallID = nil
@@ -211,17 +184,13 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
         refreshAudioRoutes()
         guard let activeCallID, let call = calls[activeCallID] else { return }
-        if call.mode == .liveVoice {
-            connectionTone.start()
-            if voiceSession == nil { prepareLiveVoice(for: call) }
-            if !webRTCAudioSessionActivated {
-                LiveVoiceSession.audioSessionDidActivate(audioSession)
-                webRTCAudioSessionActivated = true
-            }
-            voiceSession?.answer()
-        } else {
-            playAudioOrFallback(for: call)
+        connectionTone.start()
+        if voiceSession == nil { prepareLiveVoice(for: call) }
+        if !webRTCAudioSessionActivated {
+            LiveVoiceSession.audioSessionDidActivate(audioSession)
+            webRTCAudioSessionActivated = true
         }
+        voiceSession?.answer()
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
@@ -232,11 +201,6 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
         }
         voiceSession?.stop()
         voiceSession = nil
-        audioDownloadTask?.cancel()
-        audioDownloadTask = nil
-        audioPlayer?.stop()
-        audioPlayer = nil
-        speechSynthesizer.stopSpeaking(at: .immediate)
     }
 
     func toggleMute() {
@@ -304,73 +268,6 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
             resetCallPresentation()
         }
         provider.reportCall(with: call.id, endedAt: Date(), reason: .failed)
-    }
-
-    private func playAudioOrFallback(for call: IncomingCall) {
-        guard let request = call.audioRequest else {
-            speak(call.message)
-            return
-        }
-        audioDownloadTask?.cancel()
-        audioDownloadTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let (data, response) = try await URLSession.shared.data(for: request)
-                try Task.checkCancellation()
-                guard let http = response as? HTTPURLResponse,
-                      (200..<300).contains(http.statusCode),
-                      !data.isEmpty else {
-                    throw URLError(.badServerResponse)
-                }
-                guard self.activeCallID == call.id else { return }
-                let player = try AVAudioPlayer(data: data)
-                player.delegate = self
-                guard player.prepareToPlay(), player.play() else {
-                    throw URLError(.cannotDecodeContentData)
-                }
-                self.audioPlayer = player
-            } catch is CancellationError {
-                return
-            } catch {
-                guard self.activeCallID == call.id else { return }
-                self.logger.error("Audio message failed; using speech fallback: \(error.localizedDescription, privacy: .public)")
-                self.speak(call.message)
-            }
-        }
-    }
-
-    private func speak(_ message: String) {
-        let utterance = AVSpeechUtterance(string: message)
-        utterance.rate = 0.48
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-IN") ?? AVSpeechSynthesisVoice(language: "en-US")
-        speechSynthesizer.speak(utterance)
-    }
-
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        finishActiveCall()
-    }
-
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        audioPlayer = nil
-        finishActiveCall()
-    }
-
-    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: (any Error)?) {
-        audioPlayer = nil
-        guard let activeCallID, let call = calls[activeCallID] else { return }
-        logger.error("Audio message decode failed; using speech fallback: \(error?.localizedDescription ?? "unknown error", privacy: .public)")
-        speak(call.message)
-    }
-
-    private func finishActiveCall() {
-        guard let id = activeCallID else { return }
-        stopConnectionTone()
-        voiceSession?.stop()
-        voiceSession = nil
-        provider.reportCall(with: id, endedAt: Date(), reason: .remoteEnded)
-        calls.removeValue(forKey: id)
-        activeCallID = nil
-        resetCallPresentation()
     }
 
     private func stopConnectionTone() {
@@ -444,4 +341,4 @@ final class CallCoordinator: NSObject, ObservableObject, @unchecked Sendable {
     }
 }
 
-extension CallCoordinator: @preconcurrency CXProviderDelegate, @preconcurrency AVSpeechSynthesizerDelegate, @preconcurrency AVAudioPlayerDelegate {}
+extension CallCoordinator: @preconcurrency CXProviderDelegate {}

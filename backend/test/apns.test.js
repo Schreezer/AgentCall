@@ -37,7 +37,7 @@ test("VoIP delivery uses the correct APNs host, headers, and minimal payload", a
 
   await client.sendVoIP(
     { token: "a".repeat(64), environment: "sandbox" },
-    { id: "call-id", callerName: "Hermes", message: "Wake up", audioID: "audio-id" },
+    { id: "call-id", callerName: "Hermes", message: "Wake up", mode: "live_voice" },
   );
 
   assert.equal(observed.host, "https://api.sandbox.push.apple.com");
@@ -52,6 +52,58 @@ test("VoIP delivery uses the correct APNs host, headers, and minimal payload", a
     call_id: "call-id",
     caller_name: "Hermes",
     message: "Wake up",
-    audio_id: "audio-id",
+    mode: "live_voice",
+  });
+});
+
+test("one-way delivery uses an ordinary APNs alert", async () => {
+  const observed = {};
+  const connect = (host, options) => {
+    observed.host = host;
+    observed.connectOptions = options;
+    const client = new EventEmitter();
+    client.close = () => {};
+    client.request = (headers) => {
+      observed.headers = headers;
+      const request = new EventEmitter();
+      request.setEncoding = () => {};
+      request.end = (payload) => {
+        observed.payload = JSON.parse(payload);
+        queueMicrotask(() => {
+          request.emit("response", { ":status": 200 });
+          request.emit("end");
+        });
+      };
+      return request;
+    };
+    return client;
+  };
+  const { privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const client = new APNsClient({
+    teamID: "TEAMID1234",
+    keyID: "KEYID12345",
+    privateKey,
+    bundleID: "com.chirag.agentcaller",
+    connect,
+  });
+
+  await client.sendAlert(
+    { token: "a".repeat(64), alert_token: "b".repeat(64), environment: "production" },
+    { id: "message-id", callerName: "Hermes", message: "Wake up", mode: "message" },
+  );
+
+  assert.equal(observed.host, "https://api.push.apple.com");
+  assert.equal(observed.headers[":path"], `/3/device/${"b".repeat(64)}`);
+  assert.equal(observed.headers["apns-topic"], "com.chirag.agentcaller");
+  assert.equal(observed.headers["apns-push-type"], "alert");
+  assert.deepEqual(observed.payload, {
+    aps: {
+      alert: { title: "Hermes - AI agent", body: "Wake up" },
+      sound: "default",
+      "thread-id": "agentcall-messages",
+    },
+    event: "agent_message",
+    message_id: "message-id",
+    caller_name: "Hermes",
   });
 });

@@ -19,6 +19,7 @@ export class APNsClient {
 
   async sendVoIP(device, call) {
     if (!this.configured) throw new Error("APNs credentials are not configured");
+    if (call.mode !== "live_voice") throw new Error("VoIP delivery requires a live voice call");
     const host = device.environment === "production"
       ? "https://api.push.apple.com"
       : "https://api.sandbox.push.apple.com";
@@ -26,8 +27,48 @@ export class APNsClient {
       call_id: call.id,
       caller_name: call.callerName,
       message: call.message,
-      ...(call.audioID ? { audio_id: call.audioID } : {}),
+      mode: "live_voice",
     });
+
+    return this.#send(host, device.token, payload, {
+      "apns-topic": `${this.bundleID}.voip`,
+      "apns-push-type": "voip",
+      "apns-priority": "10",
+      "apns-expiration": "0",
+    });
+  }
+
+  async sendAlert(device, call) {
+    if (!this.configured) throw new Error("APNs credentials are not configured");
+    if (!device.alert_token) throw new Error("Standard APNs token is not registered");
+    if (call.mode === "live_voice") throw new Error("Live voice calls require VoIP delivery");
+    const host = device.environment === "production"
+      ? "https://api.push.apple.com"
+      : "https://api.sandbox.push.apple.com";
+    const callerName = String(call.callerName || "Your agent").trim() || "Your agent";
+    const payload = JSON.stringify({
+      aps: {
+        alert: {
+          title: `${callerName} - AI agent`,
+          body: call.message,
+        },
+        sound: "default",
+        "thread-id": "agentcall-messages",
+      },
+      event: "agent_message",
+      message_id: call.id,
+      caller_name: callerName,
+    });
+
+    return this.#send(host, device.alert_token, payload, {
+      "apns-topic": this.bundleID,
+      "apns-push-type": "alert",
+      "apns-priority": "10",
+      "apns-expiration": "0",
+    });
+  }
+
+  #send(host, deviceToken, payload, headers) {
 
     return new Promise((resolve, reject) => {
       // Some hosts advertise APNs IPv6 addresses even when their network has no
@@ -38,12 +79,9 @@ export class APNsClient {
       client.once("error", reject);
       const request = client.request({
         ":method": "POST",
-        ":path": `/3/device/${device.token}`,
+        ":path": `/3/device/${deviceToken}`,
         authorization: `bearer ${this.#providerToken()}`,
-        "apns-topic": `${this.bundleID}.voip`,
-        "apns-push-type": "voip",
-        "apns-priority": "10",
-        "apns-expiration": "0",
+        ...headers,
       });
       let status;
       let body = "";

@@ -19,6 +19,7 @@
 		957F2B184857FB30AA060459 /* AgentSetupInstructions.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEF39272247BF60214A0BEF2 /* AgentSetupInstructions.swift */; };
 		9A9FD15843041B7BE0829E18 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 5D75D40F8773B995AD498389 /* WebRTC */; };
 		A3E5DC05BB8F22EDA3D90BFC /* AgentCallerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9E51FD459E01545DCFFC6CA /* AgentCallerApp.swift */; };
+		A85EF457F1EB2514FD88AE29 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DBDEE5828ADFB40734012264 /* Assets.xcassets */; };
 		ACFB47973A641C4D157905BE /* RealtimeAudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = E50A8BDB3472348304AF8F22 /* RealtimeAudioEngine.swift */; };
 		BFE72835A882B0597F91A3C7 /* PushManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC26C500D21B32B7498A8503 /* PushManager.swift */; };
 		C508A1EAA22C70C49A5AE2FC /* VoiceBootstrapClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BD487FFADA4E17941B2E7F0 /* VoiceBootstrapClient.swift */; };
@@ -57,6 +58,7 @@
 		C5E771A6258E6D9851018FBE /* AgentCaller.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AgentCaller.entitlements; sourceTree = "<group>"; };
 		CEF39272247BF60214A0BEF2 /* AgentSetupInstructions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSetupInstructions.swift; sourceTree = "<group>"; };
 		D0EBBE46B1E251BF0EEAEB2D /* IncomingCallTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncomingCallTests.swift; sourceTree = "<group>"; };
+		DBDEE5828ADFB40734012264 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DF0D60EB0139343478B029DA /* AgentCaller.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AgentCaller.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E50A8BDB3472348304AF8F22 /* RealtimeAudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeAudioEngine.swift; sourceTree = "<group>"; };
 		EA1843E09F7866CA18A41A09 /* SecureStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureStore.swift; sourceTree = "<group>"; };
@@ -84,6 +86,7 @@
 				B9E51FD459E01545DCFFC6CA /* AgentCallerApp.swift */,
 				CEF39272247BF60214A0BEF2 /* AgentSetupInstructions.swift */,
 				41C4271FB4949524CC6F4A9F /* AppDelegate.swift */,
+				DBDEE5828ADFB40734012264 /* Assets.xcassets */,
 				BB9D3409104D81E3DEEC1254 /* CallCoordinator.swift */,
 				F87AF9411D79A5AA2EFAB24C /* CallerSettingsView.swift */,
 				574B56AA90B10AE444A666D0 /* CodexWebRTCSession.swift */,
@@ -140,6 +143,7 @@
 			buildConfigurationList = E6F0572F9D7A43C3A58E5355 /* Build configuration list for PBXNativeTarget "AgentCaller" */;
 			buildPhases = (
 				20FBD637B3716ED45867BE2D /* Sources */,
+				3EE516AAFAA4C34F2DC3AA2E /* Resources */,
 				AE9796567DB813BE476ABCE5 /* Frameworks */,
 			);
 			buildRules = (
@@ -208,6 +212,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		3EE516AAFAA4C34F2DC3AA2E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A85EF457F1EB2514FD88AE29 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		090BE0694D16760D0BE3E6B9 /* Sources */ = {
@@ -288,7 +303,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 12;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -399,7 +414,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 12;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;

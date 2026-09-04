@@ -35,8 +35,7 @@ enum AgentSetupInstructions {
            Run `scripts/update.py --check-only` after installation.
 
         Latest Caller capabilities
-        - Message or audio calls support `--message`, optional `--at`, optional `--caller-name`,
-          optional `--audio-file` / `--audio-content-type`, and a stable required
+        - Message notifications support `--message`, optional `--at`, optional `--caller-name`, and a stable required
           `--idempotency-key` sent as the `Idempotency-Key` header.
         - Live voice calls use `--live` with structured `--reason`, `--relevant-context`,
           `--desired-outcome`, and `--urgency` fields. Preserve the active `HERMES_SESSION_ID`;
@@ -102,14 +101,14 @@ enum AgentSetupInstructions {
         - The expected relay is `\(relayURL)`. If my stored `CALLER_RELAY_URL` differs, stop and
           ask me before changing anything.
         - This copied request explicitly approves the signed multi-installation profile capability
-          (skill release 0.5.18 or newer). It does not authorize displaying or copying credentials.
+          (skill release 0.5.19 or newer). It does not authorize displaying or copying credentials.
 
         Prerequisites
         - The signed `urgent-caller` skill must already be installed from my own setup. If it is
           missing, first complete my own setup flow: download
           `\(relayURL)/v1/agent-package/urgent-caller/bootstrap.py`, require SHA-256
           `\(bootstrapSHA256)`, and run the verified bootstrap.
-        - If the installed skill is older than 0.5.18, run `scripts/update.py` with
+        - If the installed skill is older than 0.5.19, run `scripts/update.py` with
           `--approve-capability-update`; this request is that approval. Verify the signed release
           notes mention multi-installation profiles before approving anything else.
 
@@ -169,15 +168,15 @@ enum AgentSetupInstructions {
         Set up Caller on this Hermes or OpenClaw server.
 
         Goal
-        - Give this agent one tool that places an urgent incoming CallKit call on my iPhone.
+        - Give this agent one tool that sends notifications and can start urgent live AI calls on my iPhone.
         - Ordinary reminders stay in chat. Call only when I explicitly request it or an urgency policy
           I explicitly approved fires.
         - This setup request explicitly approves the signed outbound voice-connector capability
           described below. It does not authorize displaying or copying any provider credential.
 
         Architecture
-        - Your VPS owns agent policy, optional scheduling, retries, and optional audio storage.
-        - Caller's managed relay owns the Apple APNs credential and final VoIP push delivery.
+        - Your VPS owns agent policy, optional scheduling, and retries.
+        - Caller's managed relay owns ordinary APNs notification delivery and PushKit delivery for live calls.
         - You do not need the Caller source code, an Apple Team ID, an APNs Key ID, a PushKit token,
           or a `.p8` file. Never ask me for those.
         - Do not deploy a second APNs backend and do not attempt to send APNs directly.
@@ -227,8 +226,7 @@ enum AgentSetupInstructions {
           and use `--approve-capability-update` only after I explicitly approve.
 
         Skill behavior
-        - Message/audio calls accept `--message`, optional `--at`, optional `--caller-name`, optional
-          `--audio-file` / `--audio-content-type`, and a stable required `--idempotency-key`.
+        - Message notifications accept `--message`, optional `--at`, optional `--caller-name`, and a stable required `--idempotency-key`.
           Send that value as the `Idempotency-Key` header so retries cannot duplicate calls.
         - Live voice calls also require `--live`, `--reason`, `--relevant-context`,
           `--desired-outcome`, and `--urgency`. Preserve the active `HERMES_SESSION_ID`; never invent,
@@ -238,15 +236,12 @@ enum AgentSetupInstructions {
           with `ask_hermes` for deeper context.
         - A scheduled timestamp must be ISO-8601 with `Z` or an explicit timezone offset. Keep the
           fallback message between 1 and 500 characters and put the urgent fact first.
-        - Audio is limited to 5 MB and expires after one hour; upload scheduled audio near due time.
 
         VPS behavior
         - Immediate calls can go directly through the skill client.
         - If reliable local scheduling is needed, use the agent's existing scheduler or install one
           supervised single-process service with persistent SQLite state on this VPS. Do not create a
           new cloud server merely for Caller.
-        - For scheduled audio, run the upload client near the due time instead of uploading the file
-          far in advance.
         - Use stable event-specific idempotency keys so retries never create duplicate calls.
         - For an immediate call, poll `GET $CALLER_RELAY_URL/v1/calls/:id` with the same bearer
           token for up to 15 seconds, until its status becomes `delivered` or `failed`. Do not stop

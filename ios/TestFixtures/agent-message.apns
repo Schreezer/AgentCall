@@ -1,0 +1,14 @@
+{
+  "Simulator Target Bundle": "com.chirag.agentcaller",
+  "aps": {
+    "alert": {
+      "title": "Hermes - AI agent",
+      "body": "Your taxi has arrived outside."
+    },
+    "sound": "default",
+    "thread-id": "agentcall-messages"
+  },
+  "event": "agent_message",
+  "message_id": "123e4567-e89b-42d3-a456-426614174000",
+  "caller_name": "Hermes"
+}

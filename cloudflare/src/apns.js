@@ -25,6 +25,9 @@ export class APNsClient {
 
   async sendVoIP(device, call) {
     if (!this.configured) throw new Error("APNs credentials are not configured");
+    if (call.mode !== "live_voice") {
+      throw new Error("VoIP delivery requires a live voice call");
+    }
     const host =
       device.environment === "production"
         ? "https://api.push.apple.com"
@@ -33,8 +36,7 @@ export class APNsClient {
       call_id: call.id,
       caller_name: call.caller_name,
       message: call.message,
-      mode: call.mode ?? "message",
-      ...(call.audio_id ? { audio_id: call.audio_id } : {}),
+      mode: "live_voice",
     };
     const response = await this.fetcher(`${host}/3/device/${device.device_token}`, {
       method: "POST",
@@ -43,6 +45,51 @@ export class APNsClient {
         "apns-id": call.id,
         "apns-topic": `${this.env.APNS_BUNDLE_ID}.voip`,
         "apns-push-type": "voip",
+        "apns-priority": "10",
+        "apns-expiration": "0",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (response.status !== 200) {
+      const body = await response.text();
+      throw new Error(`APNs ${response.status}: ${body || "unknown error"}`);
+    }
+    return { status: response.status, apnsID: response.headers.get("apns-id") };
+  }
+
+  async sendAlert(device, call) {
+    if (!this.configured) throw new Error("APNs credentials are not configured");
+    if (!device.alert_device_token) throw new Error("Standard APNs token is not registered");
+    if (call.mode === "live_voice") {
+      throw new Error("Live voice calls require VoIP delivery");
+    }
+    const host =
+      device.environment === "production"
+        ? "https://api.push.apple.com"
+        : "https://api.sandbox.push.apple.com";
+    const callerName = String(call.caller_name || "Your agent").trim() || "Your agent";
+    const payload = {
+      aps: {
+        alert: {
+          title: `${callerName} - AI agent`,
+          body: call.message,
+        },
+        sound: "default",
+        "thread-id": "agentcall-messages",
+      },
+      event: "agent_message",
+      message_id: call.id,
+      caller_name: callerName,
+    };
+    const response = await this.fetcher(`${host}/3/device/${device.alert_device_token}`, {
+      method: "POST",
+      headers: {
+        authorization: `bearer ${await this.providerToken()}`,
+        "apns-id": call.id,
+        "apns-topic": this.env.APNS_BUNDLE_ID,
+        "apns-push-type": "alert",
         "apns-priority": "10",
         "apns-expiration": "0",
         "content-type": "application/json",

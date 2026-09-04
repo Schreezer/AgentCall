@@ -6,7 +6,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    CURRENT_PROJECT_VERSION: 10
+    CURRENT_PROJECT_VERSION: 12
     MARKETING_VERSION: 0.1.0
 packages:
   WebRTC:
@@ -25,6 +25,8 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CallerRelayURL: https://agentcall-relay.chiragmgg.workers.dev
+        ITSAppUsesNonExemptEncryption: false
+        NSCameraUsageDescription: Caller may use the camera for video during a live call and will always ask first.
         NSMicrophoneUsageDescription: Caller uses the microphone only during a live conversation with your agent.
         LSApplicationCategoryType: public.app-category.productivity
         UILaunchScreen: {}
@@ -34,6 +36,7 @@ targets:
           - remote-notification
     settings:
       base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_BUNDLE_IDENTIFIER: com.chirag.agentcaller
         DEVELOPMENT_TEAM: UF4L3PL7UG
         CODE_SIGN_ENTITLEMENTS: ios/AgentCaller/AgentCaller.entitlements

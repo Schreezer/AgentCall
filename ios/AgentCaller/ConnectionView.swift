@@ -176,7 +176,7 @@ struct ConnectionView: View {
 
             statusCopy(
                 title: "Connect your agent",
-                subtitle: "Give your personal agent permission to send urgent calls to this iPhone."
+                subtitle: "Give your personal agent permission to send notifications and start live AI calls on this iPhone."
             )
 
             prominentButton(title: "Create setup instructions", systemImage: "key.fill") {
@@ -234,10 +234,10 @@ struct ConnectionView: View {
 
             statusCopy(
                 title: "Ready",
-                subtitle: "Your personal agent can call this iPhone when something cannot wait."
+                subtitle: "Your personal agent can send notifications and start live AI calls when something cannot wait."
             )
 
-            Label("Incoming calls enabled", systemImage: "checkmark.circle.fill")
+            Label("Notifications and live calls enabled", systemImage: "checkmark.circle.fill")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.green)
                 .padding(.horizontal, 14)
@@ -512,7 +512,7 @@ private struct ActiveCallView: View {
                     .foregroundStyle(.white)
                     .padding(.top, 24)
 
-                Text(call.isLiveVoice ? "Live voice" : "Voice message")
+                Text("Live AI voice")
                     .font(.headline)
                     .foregroundStyle(.white.opacity(0.68))
                     .padding(.top, 7)

@@ -1,7 +1,8 @@
 import UIKit
+import UserNotifications
 
 @MainActor
-final class AppDelegate: NSObject, UIApplicationDelegate {
+final class AppDelegate: NSObject, UIApplicationDelegate, @preconcurrency UNUserNotificationCenterDelegate {
     let configuration = ConnectionConfiguration()
     let callCoordinator = CallCoordinator()
     private(set) lazy var pushManager = PushManager(callCoordinator: callCoordinator)
@@ -13,25 +14,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         callCoordinator.configuration = configuration
         pushManager.configuration = configuration
         pushManager.approvalStore.configuration = configuration
+        UNUserNotificationCenter.current().delegate = self
         pushManager.start()
         application.registerForRemoteNotifications()
         callCoordinator.prepareMicrophonePermission()
-        #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--preview-call") {
-            print("CALLER_PREVIEW_SCHEDULED")
-            Task { @MainActor in
-                try? await Task.sleep(for: .seconds(1))
-                print("CALLER_PREVIEW_REPORTING")
-                callCoordinator.reportIncoming(
-                    IncomingCall(
-                        id: UUID(),
-                        callerName: "Hermes",
-                        message: "This is a simulator test of an urgent agent call."
-                    )
-                )
-            }
-        }
-        #endif
         return true
     }
 
@@ -60,5 +46,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
         pushManager.didReceiveAlertNotification(userInfo, completion: completionHandler)
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .list, .sound]
     }
 }

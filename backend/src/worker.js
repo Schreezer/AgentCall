@@ -27,7 +27,11 @@ export class CallWorker {
       for (const call of this.store.dueCalls(now)) {
         this.store.updateCall(call.id, { status: "delivering" });
         const devices = this.store.getDevicesForInstallation(call.installationID);
-        const results = await Promise.allSettled(devices.map((device) => this.apns.sendVoIP(device, call)));
+        const results = await Promise.allSettled(devices.map((device) =>
+          call.mode === "live_voice"
+            ? this.apns.sendVoIP(device, call)
+            : this.apns.sendAlert(device, call)
+        ));
         const errors = results
           .filter((result) => result.status === "rejected")
           .map((result) => result.reason?.message ?? String(result.reason));

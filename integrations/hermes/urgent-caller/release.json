@@ -1,14 +1,13 @@
 {
   "schema_version": 1,
-  "skill_version": "0.5.18",
+  "skill_version": "0.5.19",
   "minimum_supported_version": "0.3.0",
   "released_at": "2026-08-31T00:00:00Z",
-  "change_class": "capability_expanding",
+  "change_class": "behavior_change",
   "requires_user_approval": true,
   "capabilities": [
-    "message_calls",
+    "message_notifications",
     "scheduled_calls",
-    "audio_calls",
     "live_hermes_voice",
     "hermes_owned_voice_credentials",
     "outbound_voice_connector",
@@ -17,5 +16,5 @@
     "multi_installation_profiles",
     "family_checkin_calls"
   ],
-  "release_notes": "Adds named pairing profiles so one Hermes host can pair and call additional phones (pair.py/call.py/voice_connector.py --profile, per-profile connector services), plus a documented user-approved daily family check-in recipe with summaries reported back through ask_hermes. Expands scope: the agent can now place calls to more than one paired phone; each additional phone still requires its own physical pairing code and an explicit user-approved schedule."
+  "release_notes": "One-way agent messages now arrive through standard APNs notifications. PushKit and CallKit are reserved for genuine two-way live AI voice calls, and prerecorded or text-to-speech message calls are retired. This changes delivery behavior and requires explicit approval before updating."
 }

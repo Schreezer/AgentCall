@@ -82,37 +82,20 @@ struct CallerSettingsView: View {
 
     @ViewBuilder
     private var diagnosticsSection: some View {
-        Section {
-            if case .failed = configuration.state {
+        if case .failed = configuration.state {
+            Section("Diagnostics") {
                 Button("Retry registration", systemImage: "arrow.clockwise") {
                     pushManager.registerCurrentTokenIfPossible()
                     dismiss()
                 }
             }
-
-            #if DEBUG
-            Button("Test incoming call", systemImage: "phone.badge.waveform") {
-                callCoordinator.reportIncoming(
-                    IncomingCall(
-                        id: UUID(),
-                        callerName: "Hermes",
-                        message: "This is a preview of an urgent agent call."
-                    )
-                )
-            }
-            .accessibilityIdentifier("preview-call-button")
-            #endif
-        } header: {
-            Text("Diagnostics")
-        } footer: {
-            Text("A test call uses the system incoming-call interface but does not contact your agent.")
         }
     }
 
     private var privacySection: some View {
         Section("Privacy & permissions") {
-            Label("VoIP calls use Apple's incoming-call service. Notification permission is not required.", systemImage: "phone.connection.fill")
-            Label("Microphone access is not required for one-way spoken reminders.", systemImage: "mic.slash.fill")
+            Label("Live AI conversations use Apple's incoming-call service.", systemImage: "phone.connection.fill")
+            Label("One-way agent messages arrive as notifications and require notification permission.", systemImage: "bell.badge.fill")
             Label("Apple credentials and the phone's push token stay between Caller and the relay.", systemImage: "lock.shield.fill")
         }
     }

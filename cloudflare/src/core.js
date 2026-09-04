@@ -50,8 +50,10 @@ export function validateCall(body, now = Date.now()) {
   const callerName =
     typeof body.caller_name === "string" ? body.caller_name.trim() : "Hermes";
   if (!callerName || callerName.length > 80) return { error: "invalid_caller_name" };
-  const audioID = body.audio_id ?? null;
-  if (audioID !== null && !isUUID(audioID)) return { error: "invalid_audio_id" };
+  if (body.audio_id != null) {
+    return { error: "audio_delivery_is_not_supported" };
+  }
+  const audioID = null;
   const requestedAt = body.scheduled_at ?? new Date(now).toISOString();
   const timestamp = Date.parse(requestedAt);
   if (!Number.isFinite(timestamp)) return { error: "scheduled_at_must_be_iso_8601" };

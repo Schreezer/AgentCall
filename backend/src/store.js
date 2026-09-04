@@ -102,6 +102,7 @@ export class Store {
       callerName: input.callerName,
       message: input.message,
       audioID: input.audioID ?? null,
+      mode: input.mode ?? "message",
       scheduledAt: input.scheduledAt,
       status: "scheduled",
       idempotencyKey: idempotencyKey ?? null,

@@ -8,7 +8,7 @@ import sys
 import urllib.error
 import urllib.request
 
-SKILL_VERSION = "0.5.18"
+SKILL_VERSION = "0.5.19"
 USER_AGENT = f"AgentCall-Hermes/{SKILL_VERSION}"
 PROFILE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 

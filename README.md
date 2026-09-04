@@ -1,11 +1,8 @@
 # AgentCall
 
-AgentCall lets a personal AI agent place an incoming voice call to an iPhone when a message cannot wait. It combines a native SwiftUI app, PushKit and CallKit, a small APNs relay, and a reference skill for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+AgentCall lets a personal AI agent send an iPhone notification or start a genuine two-way AI voice call when something cannot wait. It combines a native SwiftUI app, standard APNs notifications, PushKit and CallKit for live voice, a small relay, and a reference skill for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-The relay can speak a text message, play a short supplied audio file, or place a live two-way voice call. Live voice reuses credentials already owned by the paired Hermes host: its OpenAI Codex credential pool or its xAI API key. Caller never asks the user for either credential.
-
-> [!IMPORTANT]
-> Apple documents PushKit VoIP notifications for initiating live voice calls. Treat the prerecorded-message implementation as an MVP and development tool. A production App Store version should use ordinary or time-sensitive notifications for one-way reminders and reserve PushKit/CallKit for a real, bidirectional voice session.
+One-way messages use standard notifications. PushKit and CallKit are reserved for live, bidirectional calls. Live voice reuses credentials already owned by the paired Hermes host: its OpenAI Codex credential pool or its xAI API key. Caller never asks the user for either credential.
 
 ## How it works
 
@@ -16,13 +13,10 @@ Hermes / OpenClaw / another agent
               v
        AgentCall relay
               |
-              | APNs VoIP push
+              | standard APNs alert (message)
+              | or VoIP push (live voice only)
               v
-      iPhone wakes Caller
-              |
-              | CallKit incoming-call UI
-              v
-     User answers -> TTS, uploaded audio, or live AI voice
+      iPhone notification or CallKit live-call UI
 ```
 
 The signed Hermes connector opens an authenticated outbound WebSocket to an installation-scoped Worker Durable Object, so the Hermes host needs no inbound port. For xAI it mints a short-lived client secret locally; microphone and playback audio then travel directly between the iPhone and xAI. For Codex it selects Hermes's `openai-codex` pool entry, supplies it to the official local app-server through `chatgptAuthTokens`, and answers refresh requests through Hermes's existing refresh lock. Only the SDP answer crosses the Worker. Hermes tool calls use a separate call-scoped path. The app and Worker contain no permanent xAI or OpenAI credential.
@@ -35,7 +29,7 @@ For the complete trust model and request lifecycle, see [ARCHITECTURE.md](ARCHIT
 
 | Path | Purpose |
 | --- | --- |
-| `ios/AgentCaller` | Native SwiftUI app, pairing UI, PushKit registration, CallKit handling, and audio playback |
+| `ios/AgentCaller` | Native SwiftUI app, pairing UI, notification registration, and live-call handling |
 | `backend` | Local Node.js relay for development and compatibility testing |
 | `cloudflare` | Durable Cloudflare Worker relay using D1, R2, and a Durable Object scheduler |
 | `codex-voice-broker` | Legacy rollback bridge for Worker-initiated Codex app-server realtime WebRTC |
@@ -51,7 +45,7 @@ For the complete trust model and request lifecycle, see [ARCHITECTURE.md](ARCHIT
 - An Apple Developer account with Push Notifications enabled for physical-device VoIP testing
 - An APNs signing key (`.p8`), Team ID, and Key ID for the relay
 
-UI, pairing, and the CallKit preview can be tested in the simulator. A real PushKit wake-up requires a signed build on a physical iPhone and valid APNs credentials.
+UI and pairing can be tested in the simulator. A real APNs or PushKit delivery requires a signed build on a physical iPhone and valid APNs credentials.
 
 ## Run the relay
 
@@ -185,9 +179,9 @@ python3 scripts/pair.py \
 
 The pairing client stores `CALLER_RELAY_URL` and `CALLER_AGENT_TOKEN` in the Hermes environment. Pairing codes expire and can be used only once; do not paste an agent token into chat or commit it to source control.
 
-## Place a call
+## Send a notification
 
-After pairing, the agent can place an immediate text-to-speech call:
+After pairing, the agent can send an immediate notification:
 
 ```bash
 python3 scripts/call.py \
@@ -196,7 +190,7 @@ python3 scripts/call.py \
   --idempotency-key "taxi-arrival-2026-07-14"
 ```
 
-Schedule a call by supplying a timezone-aware ISO 8601 timestamp:
+Schedule a notification by supplying a timezone-aware ISO 8601 timestamp:
 
 ```bash
 python3 scripts/call.py \
@@ -224,20 +218,6 @@ python3 scripts/call.py \
 
 Hermes supplies `HERMES_SESSION_ID`. The relay gives the selected voice provider the structured briefing and fresh governing instructions when the call is answered. The provider can consult the signed originating Hermes session through `ask_hermes` rather than receiving a large or guessed context dump. See [`codex-voice-broker/README.md`](codex-voice-broker/README.md) to enable the Codex provider; `LIVE_VOICE_PROVIDER` intentionally remains `xai` until the private broker and diagnostic are configured.
 
-### Place a call with an audio file
-
-The agent can upload MP3, M4A, AAC, WAV, AIFF, or CAF audio and have it played after the user answers:
-
-```bash
-python3 scripts/call.py \
-  --message "This text is used if the audio cannot be played." \
-  --audio-file "/path/to/message.m4a" \
-  --caller-name "PersonalClaw" \
-  --idempotency-key "spoken-reminder-2026-07-14"
-```
-
-Audio is limited to 5 MB by default and expires after one hour. For a future call, schedule the agent to upload the file close to the call time instead of uploading it when the reminder is first created. The push payload carries only an opaque audio ID; the app downloads the file after the call is answered.
-
 ## API summary
 
 | Method | Endpoint | Purpose |
@@ -249,11 +229,10 @@ Audio is limited to 5 MB by default and expires after one hour. For a future cal
 | `GET` | `/v1/agent-package/urgent-caller/manifest` | Fetch the authenticated signed skill manifest |
 | `GET` | `/v1/agent-package/urgent-caller/files/:version/:path` | Fetch a manifest-hashed release file |
 | `GET` | `/v1/installations/:id/voice-sessions/:id/hermes-events?after=:cursor` | Read ordered Hermes status changes for one active call |
-| `POST` | `/v1/audio` | Upload a short-lived audio attachment |
-| `POST` | `/v1/calls` | Place or schedule a call |
+| `POST` | `/v1/calls` | Send or schedule a notification, or start a live call |
 | `GET` | `/v1/calls/:id` | Read relay delivery status |
 
-An immediate call can move through `scheduled`, `delivering`, `delivered`, or `failed`. `delivered` means APNs accepted the push; it does not prove that the phone rang or that the user answered.
+A request can move through `scheduled`, `delivering`, `delivered`, or `failed`. For messages, `delivered` means APNs accepted the notification; for live voice, it means APNs accepted the VoIP invite. Neither proves user interaction.
 
 ## Tests
 
@@ -279,13 +258,11 @@ xcodebuild \
 
 - Never commit the APNs `.p8` key, `backend/.env`, relay state, audio storage, device tokens, installation secrets, or agent tokens.
 - Pairing codes are short-lived and single-use; installation and agent credentials are stored as hashes by the relay.
-- Uploaded audio is installation-scoped, type/size limited, returned with `Cache-Control: no-store`, and deleted after expiry.
 - A production relay still needs transactional database storage, token revocation and rotation, per-installation quotas, App Attest, encrypted content, audit logging, and APNs invalid-token cleanup.
-- Spoken content can be overheard. Agents should not include passwords, tokens, health details, or other sensitive information unless the user explicitly requests it.
+- Notification and spoken content may be visible or overheard. Agents should not include passwords, tokens, health details, or other sensitive information unless the user explicitly requests it.
 
 ## Roadmap
 
-- Live bidirectional WebRTC audio with the user's agent
 - Time-boxed ElevenLabs voice sessions: configurable 1, 3, or 5 minute limits, a five-minute server-enforced ceiling, a 30-second spoken warning, early hang-up when the task is complete, and per-user monthly minute budgets
 - User-approved caller identity for each paired agent, including a stable Contacts-backed photo or poster that CallKit can resolve on the system incoming-call screen
 - Call answered/ended event callbacks

@@ -164,6 +164,9 @@ export function createServer({ config, store, worker, audioStore }) {
 function validateDevice(body) {
   if (!body || typeof body !== "object") return "body_required";
   if (!/^[0-9a-f]{32,}$/i.test(body.token ?? "")) return "invalid_device_token";
+  if (body.alert_token != null && !/^[0-9a-f]{32,}$/i.test(body.alert_token)) {
+    return "invalid_alert_device_token";
+  }
   if (body.platform !== "ios") return "unsupported_platform";
   if (!["sandbox", "production"].includes(body.environment)) return "invalid_environment";
   if (body.device_name && (typeof body.device_name !== "string" || body.device_name.length > 120)) return "invalid_device_name";
@@ -176,17 +179,20 @@ function validateCall(body) {
   if (!message || message.length > 500) return { error: "message_must_be_1_to_500_characters" };
   const callerName = typeof body.caller_name === "string" ? body.caller_name.trim() : "Hermes";
   if (!callerName || callerName.length > 80) return { error: "invalid_caller_name" };
-  const audioID = body.audio_id ?? null;
-  if (audioID !== null && !/^[0-9a-f-]{36}$/i.test(audioID)) return { error: "invalid_audio_id" };
+  if (body.audio_id != null) return { error: "audio_delivery_is_not_supported" };
+  const audioID = null;
   const scheduledAt = body.scheduled_at ?? new Date().toISOString();
   const timestamp = Date.parse(scheduledAt);
   if (!Number.isFinite(timestamp)) return { error: "scheduled_at_must_be_iso_8601" };
   if (timestamp > Date.now() + 366 * 24 * 60 * 60 * 1000) return { error: "scheduled_at_too_far_in_future" };
+  const mode = body.mode ?? "message";
+  if (!["message", "live_voice"].includes(mode)) return { error: "invalid_call_mode" };
   return {
     value: {
       message,
       callerName,
       audioID,
+      mode,
       scheduledAt: new Date(Math.max(timestamp, Date.now())).toISOString(),
     },
   };
@@ -249,6 +255,7 @@ function publicCall(call) {
     scheduled_at: call.scheduledAt,
     delivered_at: call.deliveredAt,
     delivery_errors: call.deliveryErrors,
+    mode: call.mode ?? "message",
   };
 }
 

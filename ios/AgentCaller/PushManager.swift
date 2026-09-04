@@ -1,6 +1,7 @@
 import Foundation
 import PushKit
 import UIKit
+import UserNotifications
 
 @MainActor
 final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
@@ -196,6 +197,22 @@ final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
     }
 
     func createPairingCode() {
+        Task { [weak self] in
+            await self?.prepareMessageNotifications()
+        }
+        createPairingCodeAfterNotificationPrompt()
+    }
+
+    private func prepareMessageNotifications() async {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        if settings.authorizationStatus == .notDetermined {
+            _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+        }
+        UIApplication.shared.registerForRemoteNotifications()
+    }
+
+    private func createPairingCodeAfterNotificationPrompt() {
         guard !relayChangeInProgress else { return }
         guard let configuration,
               let relayURL = configuration.validatedRelayURL,
@@ -426,14 +443,8 @@ final class PushManager: NSObject, @preconcurrency PKPushRegistryDelegate {
         completion: @escaping () -> Void
     ) {
         let dictionary = payload.dictionaryPayload
-        let audioRequest = CallAudioRequestFactory.make(
-            payload: dictionary,
-            relayURL: configuration?.validatedRelayURL,
-            installationID: configuration?.installationID,
-            installationSecret: configuration?.installationSecret
-        )
         guard type == .voIP,
-              let call = IncomingCall(payload: dictionary, audioRequest: audioRequest) else {
+              let call = IncomingCall(payload: dictionary) else {
             completion()
             return
         }

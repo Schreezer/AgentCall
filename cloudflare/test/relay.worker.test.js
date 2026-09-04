@@ -315,7 +315,7 @@ describe("Cloudflare relay", () => {
     expect(row.device_token).toBe("12".repeat(32));
   });
 
-  it("runs registration, pairing, audio, idempotency, and alarm delivery", async () => {
+  it("runs registration, pairing, notification idempotency, and alarm delivery", async () => {
     const health = await exports.default.fetch("https://relay.test/health");
     expect(health.status).toBe(200);
     expect(await health.json()).toMatchObject({
@@ -328,6 +328,7 @@ describe("Cloudflare relay", () => {
       method: "POST",
       body: {
         token: "ab".repeat(32),
+        alert_token: "cd".repeat(32),
         platform: "ios",
         environment: "sandbox",
         device_name: "Workers test",
@@ -371,7 +372,6 @@ describe("Cloudflare relay", () => {
     const callInput = {
       message: "Workers runtime delivery test",
       caller_name: "Test",
-      audio_id: audio.audio_id,
       scheduled_at: new Date(Date.now() + 60_000).toISOString(),
     };
     const first = await requestJSON("/v1/calls", {
