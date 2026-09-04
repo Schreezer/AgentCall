@@ -9,10 +9,12 @@ struct ConnectionView: View {
 
     @EnvironmentObject private var configuration: ConnectionConfiguration
     @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var agentStore = HostedAgentStore()
     @State private var didCopyInstructions = false
     @State private var didCopyFamilyInstructions = false
     @State private var didCopyUpdateInstructions = false
     @State private var isShowingSettings = false
+    @State private var isEnablingAssistant = false
     @State private var now = Date()
 
     private let pairingPoller = Timer.publish(every: 4, on: .main, in: .common).autoconnect()
@@ -58,8 +60,13 @@ struct ConnectionView: View {
             CallerSettingsView(
                 configuration: configuration,
                 pushManager: pushManager,
-                callCoordinator: callCoordinator
+                callCoordinator: callCoordinator,
+                agentStore: agentStore
             )
+        }
+        .onAppear { agentStore.configuration = configuration }
+        .onChange(of: configuration.agentMode) { _, mode in
+            if mode == .hosted { agentStore.load() }
         }
         .onReceive(pairingPoller) { date in
             now = date
@@ -144,6 +151,9 @@ struct ConnectionView: View {
         case .paired:
             pairedView
                 .transition(.opacity.combined(with: .scale(scale: 0.98)))
+        case .hostedAssistant:
+            hostedAssistantView
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
         case .needsAttention(let message):
             attentionView(message: message)
                 .transition(.opacity.combined(with: .scale(scale: 0.98)))
@@ -175,21 +185,92 @@ struct ConnectionView: View {
             statusIcon(systemImage: "person.crop.circle.badge.plus", color: .blue)
 
             statusCopy(
-                title: "Connect your agent",
-                subtitle: "Give your personal agent permission to send notifications and start live AI calls on this iPhone."
+                title: "Choose your agent",
+                subtitle: "Use the built-in assistant right away, or connect a personal agent you already run."
             )
 
-            prominentButton(title: "Create setup instructions", systemImage: "key.fill") {
-                pushManager.createPairingCode()
+            prominentButton(
+                title: isEnablingAssistant ? "Setting up…" : "Use the built-in assistant",
+                systemImage: "sparkles"
+            ) {
+                enableHostedAssistant()
             }
+            .disabled(isEnablingAssistant)
+            .accessibilityIdentifier("enable-hosted-assistant-button")
+
+            Button {
+                pushManager.createPairingCode()
+            } label: {
+                Label("Connect my own agent", systemImage: "key.fill")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: 52)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle(radius: 17))
             .accessibilityIdentifier("new-pairing-code-button")
 
-            Text("The setup code is private, expires automatically, and never exposes Apple credentials.")
+            if let errorMessage = agentStore.errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+            }
+
+            Text("The built-in assistant chats here, remembers what you tell it, and can call or notify you on a schedule. Connecting your own agent uses a private setup code instead.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .accessibilityIdentifier("agent-setup-card")
+    }
+
+    private var hostedAssistantView: some View {
+        statusSurface {
+            statusIcon(systemImage: "sparkles", color: .blue)
+
+            statusCopy(
+                title: "Your assistant is ready",
+                subtitle: "Chat to set up calls, reminders, and recurring check-ins. It can ring this iPhone whenever you ask."
+            )
+
+            NavigationLink {
+                AgentChatView(store: agentStore)
+            } label: {
+                Label("Open chat", systemImage: "bubble.left.and.bubble.right.fill")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: 52)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 17))
+            .accessibilityIdentifier("open-agent-chat-button")
+
+            if let status = agentStore.status {
+                HStack(spacing: 14) {
+                    Label("\(status.scheduleCount) scheduled", systemImage: "calendar.badge.clock")
+                    Label("\(status.usage.calls)/\(status.limits.dailyCallLimit) calls today", systemImage: "phone.fill")
+                }
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("hosted-assistant-summary")
+            }
+
+            Text("Calls stay within your daily limit and quiet hours. Adjust both in Settings.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .accessibilityIdentifier("hosted-assistant-card")
+    }
+
+    private func enableHostedAssistant() {
+        guard !isEnablingAssistant else { return }
+        isEnablingAssistant = true
+        Task { @MainActor in
+            _ = await agentStore.enable()
+            isEnablingAssistant = false
+        }
     }
 
     private var waitingForPairingView: some View {

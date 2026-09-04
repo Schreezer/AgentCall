@@ -4,12 +4,16 @@ struct CallerSettingsView: View {
     @ObservedObject var configuration: ConnectionConfiguration
     let pushManager: PushManager
     let callCoordinator: CallCoordinator
+    @ObservedObject var agentStore: HostedAgentStore
 
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             Form {
+                if configuration.usesHostedAssistant {
+                    HostedAssistantSettingsSection(store: agentStore)
+                }
                 agentSection
                 connectionSection
                 diagnosticsSection
@@ -29,7 +33,11 @@ struct CallerSettingsView: View {
     @ViewBuilder
     private var agentSection: some View {
         Section {
-            statusRow("Personal agent", value: agentStatusText, ready: configuration.agentPaired)
+            statusRow(
+                "Personal agent",
+                value: agentStatusText,
+                ready: configuration.agentPaired || configuration.usesHostedAssistant
+            )
 
             if configuration.hasUsablePairingCode() {
                 HStack {
@@ -101,6 +109,7 @@ struct CallerSettingsView: View {
     }
 
     private var agentStatusText: String {
+        if configuration.usesHostedAssistant { return "Built-in assistant" }
         if configuration.agentPaired { return "Connected" }
         if configuration.hasUsablePairingCode() { return "Waiting" }
         return "Not connected"
@@ -118,6 +127,97 @@ struct CallerSettingsView: View {
             Spacer(minLength: 12)
             readinessLabel(value, ready: ready)
         }
+    }
+}
+
+private struct HostedAssistantSettingsSection: View {
+    @ObservedObject var store: HostedAgentStore
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var quietStart = Date()
+    @State private var quietEnd = Date()
+    @State private var dailyCallLimit = 6
+    @State private var displayName = ""
+    @State private var didLoadSettings = false
+    @State private var isConfirmingDisable = false
+    @State private var isSaving = false
+
+    var body: some View {
+        Section {
+            DatePicker("Quiet hours start", selection: $quietStart, displayedComponents: .hourAndMinute)
+                .onChange(of: quietStart) { _, _ in saveIfLoaded(["quiet_start": Self.clock(quietStart)]) }
+            DatePicker("Quiet hours end", selection: $quietEnd, displayedComponents: .hourAndMinute)
+                .onChange(of: quietEnd) { _, _ in saveIfLoaded(["quiet_end": Self.clock(quietEnd)]) }
+            Stepper("Calls per day: \(dailyCallLimit)", value: $dailyCallLimit, in: 0...24)
+                .onChange(of: dailyCallLimit) { _, value in saveIfLoaded(["daily_call_limit": value]) }
+            HStack {
+                Text("Name")
+                TextField("Assistant", text: $displayName)
+                    .multilineTextAlignment(.trailing)
+                    .onSubmit { saveIfLoaded(["display_name": displayName]) }
+            }
+            if let status = store.status {
+                LabeledContent("Today", value: "\(status.usage.calls) calls · \(status.usage.turns) messages")
+                LabeledContent("Model", value: status.model)
+            }
+            Button("Turn off built-in assistant", role: .destructive) {
+                isConfirmingDisable = true
+            }
+            .accessibilityIdentifier("disable-hosted-assistant-button")
+        } header: {
+            Text("Built-in assistant")
+        } footer: {
+            Text("Quiet hours use this iPhone's time zone. The assistant will not ring you inside them and will move scheduled calls to when they end.")
+        }
+        .task { loadSettingsIfNeeded() }
+        .onChange(of: store.status?.settings) { _, _ in loadSettingsIfNeeded(force: true) }
+        .confirmationDialog(
+            "Turn off the built-in assistant?",
+            isPresented: $isConfirmingDisable,
+            titleVisibility: .visible
+        ) {
+            Button("Turn off and delete its memory", role: .destructive) {
+                Task { @MainActor in
+                    if await store.disable() { dismiss() }
+                }
+            }
+            Button("Keep it", role: .cancel) {}
+        } message: {
+            Text("Chat history, notes, and schedules are deleted. You can turn it back on any time.")
+        }
+    }
+
+    private func loadSettingsIfNeeded(force: Bool = false) {
+        guard let settings = store.status?.settings, force || !didLoadSettings else { return }
+        didLoadSettings = false
+        quietStart = Self.date(fromClock: settings.quietStart)
+        quietEnd = Self.date(fromClock: settings.quietEnd)
+        dailyCallLimit = settings.dailyCallLimit
+        displayName = settings.displayName
+        // Let the onChange handlers settle before treating edits as user intent.
+        Task { @MainActor in didLoadSettings = true }
+    }
+
+    private func saveIfLoaded(_ changes: [String: any Sendable]) {
+        guard didLoadSettings, !isSaving else { return }
+        isSaving = true
+        Task { @MainActor in
+            _ = await store.updateSettings(changes)
+            isSaving = false
+        }
+    }
+
+    private static func clock(_ date: Date) -> String {
+        let components = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return String(format: "%02d:%02d", components.hour ?? 0, components.minute ?? 0)
+    }
+
+    private static func date(fromClock clock: String) -> Date {
+        let parts = clock.split(separator: ":").compactMap { Int($0) }
+        var components = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        components.hour = parts.first ?? 0
+        components.minute = parts.count > 1 ? parts[1] : 0
+        return Calendar.current.date(from: components) ?? Date()
     }
 }
 

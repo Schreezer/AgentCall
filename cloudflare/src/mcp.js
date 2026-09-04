@@ -70,11 +70,27 @@ export async function authorizeMcp(request, env) {
 }
 
 export async function executeHermesTool(env, scope, requestID, name, args) {
+  const hosted = await installationIsHosted(env, scope.installation_id);
   if (name === "ask_hermes") {
     const error = validateAskHermes(args);
     if (error) return { ok: false, error };
     const replayKey = await hashCredential(`${scope.id}:ask_hermes:${requestID}`);
     const requestHash = await hashCredential(stableStringify(args));
+    if (hosted) {
+      try {
+        const accepted = await env.HOSTED_AGENT.getByName(scope.installation_id).acceptVoiceAsk({
+          installationID: scope.installation_id,
+          callID: scope.call_id,
+          voiceSessionID: scope.id,
+          replayKey,
+          requestHash,
+          request: args.request,
+        });
+        return { ok: true, value: accepted };
+      } catch (error) {
+        return { ok: false, error: error?.message ?? String(error) };
+      }
+    }
     const coordinator = env.HERMES_COORDINATOR.getByName(scope.installation_id);
     try {
       const accepted = await coordinator.acceptOperation({
@@ -116,9 +132,11 @@ export async function executeHermesTool(env, scope, requestID, name, args) {
     const allowed = operation && (operation.voice_session_id === scope.id || grants.includes(operationID));
     if (!allowed) return { ok: false, error: "hermes_operation_not_allowed" };
     try {
-      const value = await env.HERMES_COORDINATOR
-        .getByName(scope.installation_id)
-        .operationStatus(operationID);
+      const value = hosted
+        ? await env.HOSTED_AGENT.getByName(scope.installation_id).voiceOperationStatus(operationID)
+        : await env.HERMES_COORDINATOR
+          .getByName(scope.installation_id)
+          .operationStatus(operationID);
       return { ok: true, value };
     } catch (error) {
       return { ok: false, error: error?.message ?? String(error) };
@@ -126,6 +144,13 @@ export async function executeHermesTool(env, scope, requestID, name, args) {
   }
 
   return { ok: false, error: "unsupported_tool" };
+}
+
+async function installationIsHosted(env, installationID) {
+  const row = await env.DB.prepare("SELECT agent_mode FROM installations WHERE id = ?1")
+    .bind(installationID)
+    .first();
+  return row?.agent_mode === "hosted";
 }
 
 function validateAskHermes(args) {

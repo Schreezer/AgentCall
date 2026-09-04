@@ -146,6 +146,7 @@ export function publicInstallation(row, installationSecret) {
     installation_id: row.id,
     ...(installationSecret ? { installation_secret: installationSecret } : {}),
     paired: Boolean(row.agent_token_hash),
+    agent_mode: row.agent_mode === "hosted" ? "hosted" : "external",
     pairing_code: row.pairing_code,
     pairing_expires_at: row.pairing_expires_at
       ? new Date(row.pairing_expires_at).toISOString()

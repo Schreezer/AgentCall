@@ -37,7 +37,13 @@ final class ConnectionConfiguration: ObservableObject {
         case readyToPair
         case waitingForPairing
         case paired
+        case hostedAssistant
         case needsAttention(String)
+    }
+
+    enum AgentMode: String, Equatable {
+        case external
+        case hosted
     }
 
     @Published private(set) var relayURL: String
@@ -46,6 +52,7 @@ final class ConnectionConfiguration: ObservableObject {
     @Published private(set) var pairingCode: String?
     @Published private(set) var pairingExpiresAt: Date?
     @Published private(set) var agentPaired = false
+    @Published private(set) var agentMode: AgentMode = .external
     private(set) var relayGeneration = 0
     private var relayURLIsDurablyStored = false
 
@@ -107,6 +114,10 @@ final class ConnectionConfiguration: ObservableObject {
         } else if launchArguments.contains("--demo-paired") {
             hasPushToken = true
             agentPaired = true
+            state = .connected
+        } else if launchArguments.contains("--demo-hosted") {
+            hasPushToken = true
+            agentMode = .hosted
             state = .connected
         } else if launchArguments.contains("--demo-pairing") {
             pairingCode = "HERM-3S26"
@@ -197,16 +208,23 @@ final class ConnectionConfiguration: ObservableObject {
     }
     var isReadyForAgentSetup: Bool { state == .connected && hasPushToken }
     var isUsingDefaultRelay: Bool { normalizedURLString(relayURL) == normalizedURLString(defaultRelayURL) }
+    var usesHostedAssistant: Bool { agentMode == .hosted }
 
     var statusText: String {
         switch state {
         case .notConfigured: "Relay needs attention"
         case .waitingForPushToken: "Preparing incoming calls…"
         case .connecting: "Connecting to Caller relay…"
+        case .connected where agentMode == .hosted: "Built-in assistant ready"
         case .connected where agentPaired: "Agent paired and ready"
         case .connected: "iPhone ready to pair"
         case .failed(let message): message
         }
+    }
+
+    /// Records the relay's view of which agent serves this installation.
+    func markAgentMode(_ mode: AgentMode) {
+        agentMode = mode
     }
 
     func validatedRelayURL(for candidate: String) -> URL? {
@@ -402,6 +420,7 @@ final class ConnectionConfiguration: ObservableObject {
         pairingCode = registration.pairingCode
         pairingExpiresAt = registration.pairingExpiresAt
         agentPaired = registration.paired
+        agentMode = AgentMode(rawValue: registration.agentMode) ?? .external
         hasPushToken = true
         state = .connected
         return true
@@ -455,6 +474,7 @@ final class ConnectionConfiguration: ObservableObject {
         }
         guard isReadyForAgentSetup else { return .preparing }
         if hasUsablePairingCode(at: date) { return .waitingForPairing }
+        if agentMode == .hosted { return .hostedAssistant }
         return agentPaired ? .paired : .readyToPair
     }
 
@@ -604,6 +624,7 @@ struct InstallationRegistration: Decodable {
     let paired: Bool
     let pairingCode: String?
     let pairingExpiresAt: Date?
+    let agentMode: String
 
     enum CodingKeys: String, CodingKey {
         case installationID = "installation_id"
@@ -611,5 +632,33 @@ struct InstallationRegistration: Decodable {
         case paired
         case pairingCode = "pairing_code"
         case pairingExpiresAt = "pairing_expires_at"
+        case agentMode = "agent_mode"
+    }
+
+    init(
+        installationID: String,
+        installationSecret: String?,
+        paired: Bool,
+        pairingCode: String?,
+        pairingExpiresAt: Date?,
+        agentMode: String = "external"
+    ) {
+        self.installationID = installationID
+        self.installationSecret = installationSecret
+        self.paired = paired
+        self.pairingCode = pairingCode
+        self.pairingExpiresAt = pairingExpiresAt
+        self.agentMode = agentMode
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        installationID = try container.decode(String.self, forKey: .installationID)
+        installationSecret = try container.decodeIfPresent(String.self, forKey: .installationSecret)
+        paired = try container.decodeIfPresent(Bool.self, forKey: .paired) ?? false
+        pairingCode = try container.decodeIfPresent(String.self, forKey: .pairingCode)
+        pairingExpiresAt = try container.decodeIfPresent(Date.self, forKey: .pairingExpiresAt)
+        // Relays predating hosted mode omit the field; treat them as external-agent only.
+        agentMode = try container.decodeIfPresent(String.self, forKey: .agentMode) ?? "external"
     }
 }

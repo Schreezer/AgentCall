@@ -18,9 +18,12 @@ export async function createVoiceBootstrap(request, env, installation, callID, b
   if (Date.now() - call.scheduled_at > 30 * 60_000) {
     return json(410, { error: "live_call_expired" });
   }
-  const backend = voiceBackend(env);
+  // Hosted installations have no agent host, so the Worker mints the xAI credential itself and the
+  // voice model's MCP tools are served by the installation's HostedAgent.
+  const hosted = installation.agent_mode === "hosted";
+  const backend = hosted ? "legacy" : voiceBackend(env);
   if (!backend) return json(503, { error: "live_voice_backend_invalid" });
-  let provider = backend === "legacy" ? voiceProvider(env) : null;
+  let provider = hosted ? "xai" : backend === "legacy" ? voiceProvider(env) : null;
   if (backend === "legacy" && !provider) return json(503, { error: "live_voice_provider_invalid" });
   if ((backend === "hermes_connector" || provider === "codex") && !validOfferSDP(body.offer_sdp)) {
     return json(400, { error: "valid_webrtc_offer_required" });
@@ -150,7 +153,7 @@ export async function createVoiceBootstrap(request, env, installation, callID, b
       expires_at: new Date(expiresAt).toISOString(),
     },
     session: {
-      instructions: voiceInstructions(briefing),
+      instructions: voiceInstructions(briefing, hosted),
       voice: env.XAI_VOICE || "eve",
       reasoning: { effort: "high" },
       turn_detection: { type: "server_vad", silence_duration_ms: 700 },
@@ -163,8 +166,10 @@ export async function createVoiceBootstrap(request, env, installation, callID, b
         {
           type: "mcp",
           server_url: `${baseURL.replace(/\/$/, "")}/mcp`,
-          server_label: "hermes",
-          server_description: "Consult Chirag's personal Hermes agent using its signed session lineage.",
+          server_label: hosted ? "assistant" : "hermes",
+          server_description: hosted
+            ? "Consult the user's Caller assistant, which remembers past chats and can schedule follow-ups."
+            : "Consult Chirag's personal Hermes agent using its signed session lineage.",
           allowed_tools: ["ask_hermes", "check_hermes_task"],
           authorization: `Bearer ${mcpToken}`,
         },
@@ -297,11 +302,12 @@ export async function mintXaiClientSecret(
 
 export async function revokeVoiceSession(env, installationID, voiceSessionID) {
   const session = await env.DB.prepare(
-    `SELECT id, provider FROM voice_sessions
-      WHERE id = ?1 AND installation_id = ?2 AND revoked_at IS NULL`,
+    `SELECT s.id, s.provider, i.agent_mode FROM voice_sessions s
+      JOIN installations i ON i.id = s.installation_id
+      WHERE s.id = ?1 AND s.installation_id = ?2 AND s.revoked_at IS NULL`,
   ).bind(voiceSessionID.toLowerCase(), installationID).first();
   if (!session) return false;
-  if (voiceBackend(env) === "hermes_connector") {
+  if (session.agent_mode !== "hosted" && voiceBackend(env) === "hermes_connector") {
     await connectorRequest(env, installationID, {
       type: "voice.session.stop",
       session_id: session.id,
@@ -472,11 +478,12 @@ async function boundedResponseJSON(response, maxBytes) {
   }
 }
 
-function voiceInstructions(briefing) {
+function voiceInstructions(briefing, hosted = false) {
+  const agentName = hosted ? "the user's assistant" : "Hermes";
   return [
-    "You are Hermes's voice agent on a phone call.",
+    `You are ${agentName}'s voice agent on a phone call.`,
     "For your first response, use only the current call briefing below.",
-    "Briefly say why Hermes called, then ask the briefing's needed question.",
+    `Briefly say why ${agentName} called, then ask the briefing's needed question.`,
     "Do not mention any plan, reminder, or task absent from this briefing.",
     "Do not use a tool before asking the briefing's question and hearing the user's answer.",
     "Keep responses concise, natural, and conversational.",

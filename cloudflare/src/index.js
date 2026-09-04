@@ -13,13 +13,14 @@ import {
   randomToken,
   safeFilename,
   validIdempotencyKey,
-  validateCall,
   validateDevice,
 } from "./core.js";
+import { createCallRecord, notifyScheduler } from "./calls.js";
 import { RelayScheduler } from "./scheduler.js";
 import { HermesInstallationCoordinator } from "./hermes-installation-coordinator.js";
 import { HermesOperationWorkflow } from "./hermes-operation-workflow.js";
 import { VoiceConnector } from "./voice-connector.js";
+import { HostedAgent } from "./hosted-agent.js";
 import { authorizeMcp, executeHermesTool, handleMcp } from "./mcp.js";
 import {
   createVoiceBootstrap,
@@ -35,9 +36,21 @@ import {
   withSkillReleaseHeaders,
 } from "./skill-release.js";
 
-export { RelayScheduler, HermesInstallationCoordinator, HermesOperationWorkflow, VoiceConnector };
+export { RelayScheduler, HermesInstallationCoordinator, HermesOperationWorkflow, VoiceConnector, HostedAgent };
 
 const JSON_BODY_LIMIT = 16_384;
+const HOSTED_AGENT_INTERNAL_ORIGIN = "https://hosted-agent.internal";
+/** Installation-authenticated hosted-agent routes forwarded verbatim to the Durable Object. */
+const HOSTED_AGENT_FORWARDED_ROUTES = [
+  { method: "GET", pattern: /^\/status$/ },
+  { method: "POST", pattern: /^\/chat$/, rateLimit: 30 },
+  { method: "GET", pattern: /^\/messages$/ },
+  { method: "GET", pattern: /^\/schedules$/ },
+  { method: "DELETE", pattern: /^\/schedules\/[A-Za-z0-9_-]+$/ },
+  { method: "GET", pattern: /^\/settings$/ },
+  { method: "PUT", pattern: /^\/settings$/ },
+  { method: "GET", pattern: /^\/memories$/ },
+];
 const VOICE_BOOTSTRAP_BODY_LIMIT = 160_000;
 const DEFAULT_AUDIO_MAX_BYTES = 5_000_000;
 const DEFAULT_AUDIO_TTL_SECONDS = 3_600;
@@ -190,6 +203,15 @@ async function route(request, env, context) {
     return downloadAudio(env, installation.id, audioDownloadMatch[2]);
   }
 
+  const hostedAgentMatch = url.pathname.match(
+    /^\/v1\/installations\/([0-9a-f-]+)\/agent(\/.*)?$/i,
+  );
+  if (hostedAgentMatch) {
+    const installation = await authorizeInstallation(env, hostedAgentMatch[1], bearerToken(request));
+    if (!installation) return json(401, { error: "invalid_installation_credential" });
+    return handleHostedAgentRoute(request, env, installation, hostedAgentMatch[2] || "");
+  }
+
   const bootstrapMatch = url.pathname.match(
     /^\/v1\/installations\/([0-9a-f-]+)\/calls\/([0-9a-f-]+)\/voice-bootstrap$/i,
   );
@@ -274,6 +296,7 @@ async function route(request, env, context) {
       bearerToken(request),
     );
     if (!installation) return json(401, { error: "invalid_installation_credential" });
+    if (installation.agent_mode === "hosted") await destroyHostedAgent(env, installation.id);
     await deleteInstallation(env, installation.id);
     await notifyScheduler(env, installation.id, "cancel");
     return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
@@ -598,64 +621,88 @@ async function createCall(request, env, installation) {
   if (!validIdempotencyKey(idempotencyKey)) {
     return json(400, { error: "valid_idempotency_key_required" });
   }
-  const parsed = validateCall(await readJSON(request));
-  if (parsed.error) return json(400, { error: parsed.error });
-  const input = parsed.value;
-  if (input.audioID) {
-    const audio = await env.DB.prepare(
-      "SELECT * FROM audio WHERE id = ?1 AND installation_id = ?2 AND expires_at > ?3",
-    )
-      .bind(input.audioID, installation.id, Date.now())
-      .first();
-    if (!audio) return json(400, { error: "invalid_or_expired_audio_id" });
-    if (input.scheduledAt >= audio.expires_at) {
-      return json(400, { error: "audio_will_expire_before_scheduled_call" });
-    }
+  const result = await createCallRecord(env, installation, await readJSON(request), idempotencyKey);
+  if (result.ok === false) return json(result.status, { error: result.error });
+  return json(result.created ? 202 : 200, publicCall(result.call));
+}
+
+/**
+ * Installation-authenticated hosted-agent surface: enable/disable plus a whitelist of routes
+ * forwarded to the installation's HostedAgent Durable Object.
+ *
+ * @param {Request} request
+ * @param {Env} env
+ * @param {any} installation
+ * @param {string} subpath Path after `/agent`, e.g. `/chat` (empty for `/agent` itself).
+ */
+async function handleHostedAgentRoute(request, env, installation, subpath) {
+  const agent = env.HOSTED_AGENT.getByName(installation.id);
+
+  if (request.method === "POST" && subpath === "/enable") {
+    if (!env.ANTHROPIC_API_KEY) return json(503, { error: "hosted_agent_not_available" });
+    if (!(await allowRate(env, `agent-enable:${installation.id}`, 5))) return rateLimited();
+    const body = await readJSON(request);
+    const now = Date.now();
+    await env.DB.prepare(
+      `UPDATE installations
+          SET agent_mode = 'hosted',
+              hosted_agent_enabled_at = COALESCE(hosted_agent_enabled_at, ?2),
+              updated_at = ?2
+        WHERE id = ?1`,
+    ).bind(installation.id, now).run();
+    const response = await agent.fetch(new Request(`${HOSTED_AGENT_INTERNAL_ORIGIN}/enable`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+    const status = response.ok ? await response.json() : null;
+    return json(200, {
+      ...publicInstallation({ ...installation, agent_mode: "hosted" }),
+      agent: status,
+    });
   }
 
-  const id = crypto.randomUUID();
-  const now = Date.now();
-  const requestHash = await hashCredential(JSON.stringify(input));
-  const inserted = await env.DB.prepare(
-    `INSERT OR IGNORE INTO calls (
-       id, installation_id, caller_name, message, audio_id, scheduled_at,
-       status, idempotency_key, created_at, delivery_errors, mode,
-       call_context_json, origin_hermes_session_id, request_hash
-     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'scheduled', ?7, ?8, '[]', ?9, ?10, ?11, ?12)`,
-  )
-    .bind(
-      id,
-      installation.id,
-      input.callerName,
-      input.message,
-      input.audioID,
-      input.scheduledAt,
-      idempotencyKey,
-      now,
-      input.mode,
-      input.callContext ? JSON.stringify(input.callContext) : null,
-      input.originHermesSessionID,
-      requestHash,
-    )
-    .run();
-  const created = inserted.meta.changes > 0;
-  let call = await env.DB.prepare(
-    "SELECT * FROM calls WHERE installation_id = ?1 AND idempotency_key = ?2",
-  )
-    .bind(installation.id, idempotencyKey)
-    .first();
-
-  if (!created && call.request_hash && call.request_hash !== requestHash) {
-    return json(409, { error: "idempotency_key_reused_with_different_call" });
+  if (request.method === "DELETE" && subpath === "") {
+    if (installation.agent_mode === "hosted") await destroyHostedAgent(env, installation.id);
+    await env.DB.prepare(
+      `UPDATE installations SET agent_mode = 'external', updated_at = ?2 WHERE id = ?1`,
+    ).bind(installation.id, Date.now()).run();
+    return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
   }
 
-  await notifyScheduler(
-    env,
-    installation.id,
-    input.scheduledAt <= Date.now() ? "drain" : "schedule",
+  const route = HOSTED_AGENT_FORWARDED_ROUTES.find(
+    (candidate) => candidate.method === request.method && candidate.pattern.test(subpath),
   );
-  call = (await env.DB.prepare("SELECT * FROM calls WHERE id = ?1").bind(call.id).first()) ?? call;
-  return json(created ? 202 : 200, publicCall(call));
+  if (!route) return json(404, { error: "not_found" });
+  if (installation.agent_mode !== "hosted") return json(409, { error: "hosted_agent_disabled" });
+  if (route.rateLimit && !(await allowRate(env, `agent-route:${installation.id}`, route.rateLimit))) {
+    return rateLimited();
+  }
+  const search = new URL(request.url).search;
+  const body = ["POST", "PUT"].includes(request.method) ? await readJSON(request) : null;
+  const forwarded = new Request(`${HOSTED_AGENT_INTERNAL_ORIGIN}${subpath}${search}`, {
+    method: request.method,
+    headers: body ? { "content-type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : null,
+  });
+  const response = await agent.fetch(forwarded);
+  const headers = new Headers(response.headers);
+  headers.set("cache-control", "no-store");
+  return new Response(response.body, { status: response.status, headers });
+}
+
+async function destroyHostedAgent(env, installationID) {
+  try {
+    await env.HOSTED_AGENT.getByName(installationID).fetch(
+      new Request(`${HOSTED_AGENT_INTERNAL_ORIGIN}/destroy`, { method: "POST" }),
+    );
+  } catch (error) {
+    console.error(JSON.stringify({
+      message: "Hosted agent destroy failed",
+      installation_id: installationID,
+      error: error?.message ?? String(error),
+    }));
+  }
 }
 
 async function deleteInstallation(env, installationID) {
@@ -827,15 +874,6 @@ async function allowRate(env, key, limit, windowMs = 60_000) {
     .bind(key, windowStart)
     .first();
   return row.count <= limit;
-}
-
-async function notifyScheduler(env, installationID, operation) {
-  const scheduler = env.SCHEDULER.getByName(installationID);
-  if (operation === "drain") return scheduler.drain();
-  if (operation === "schedule") return scheduler.schedule();
-  if (operation === "maintenance") return scheduler.maintenance();
-  if (operation === "cancel") return scheduler.cancel();
-  throw new Error("invalid_scheduler_operation");
 }
 
 async function runMaintenance(env) {

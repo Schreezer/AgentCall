@@ -258,6 +258,11 @@ export async function prewarmLiveCallAgent(env, installationID, call) {
   if (String(env.LIVE_VOICE_BACKEND || "legacy").toLowerCase() !== "hermes_connector") {
     return { ok: true, skipped: true };
   }
+  // Hosted installations have no connector to prewarm; the Worker mints the voice credential itself.
+  const installation = env.DB
+    ? await env.DB.prepare("SELECT agent_mode FROM installations WHERE id = ?1").bind(installationID).first()
+    : null;
+  if (installation?.agent_mode === "hosted") return { ok: true, skipped: true };
   const requested = String(env.LIVE_VOICE_PROVIDER || "auto").toLowerCase();
   const preferredProvider = ["codex", "xai"].includes(requested) ? requested : null;
   try {

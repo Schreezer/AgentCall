@@ -7,14 +7,17 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		002961A6A8D27A07483AA7DA /* AgentChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A4F453B7801FEBB521843C6 /* AgentChatView.swift */; };
 		003F0D76E21D3AB0A006FB91 /* IncomingCallTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0EBBE46B1E251BF0EEAEB2D /* IncomingCallTests.swift */; };
 		31E3A78159F80DC6D1942B72 /* ConnectionTone.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE5B8F6B4CA82BDC68B47DA7 /* ConnectionTone.swift */; };
 		43D143C8E4224A4FB867E78D /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41C4271FB4949524CC6F4A9F /* AppDelegate.swift */; };
+		63C1788360A479D73FCF9D42 /* HostedAgentClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D306AE2175FA158778C83C07 /* HostedAgentClient.swift */; };
 		6430A6982A7589405C7EF9D7 /* ConnectionConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B07010CC7FFC70B15F2D63F /* ConnectionConfigurationTests.swift */; };
 		7E491E0ABAF39C4DE5FFACF3 /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66E4EA04E64A4C94B7A56C6B /* ConnectionView.swift */; };
 		80130123320211526C95720D /* ConnectionConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46DF6A4FE5F4CDAD72FA77FC /* ConnectionConfiguration.swift */; };
 		8A0FDC18565039B45ED5D805 /* IncomingCall.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7262E5F4AD2767721904F981 /* IncomingCall.swift */; };
 		8BB04FB27ABD62C254BC1FAC /* CallCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB9D3409104D81E3DEEC1254 /* CallCoordinator.swift */; };
+		9320A32AB436A2DCD0A9FFEA /* HostedAgentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9119C0E74D674E40C1F137B /* HostedAgentStore.swift */; };
 		93B6AC5C10468C268DBE473D /* GrokVoiceSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BB8F2EF75E8086506400E58 /* GrokVoiceSession.swift */; };
 		957F2B184857FB30AA060459 /* AgentSetupInstructions.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEF39272247BF60214A0BEF2 /* AgentSetupInstructions.swift */; };
 		9A9FD15843041B7BE0829E18 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 5D75D40F8773B995AD498389 /* WebRTC */; };
@@ -42,6 +45,7 @@
 
 /* Begin PBXFileReference section */
 		0CF3EB5A26F4E48F88EEC6BD /* LiveVoiceSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveVoiceSession.swift; sourceTree = "<group>"; };
+		1A4F453B7801FEBB521843C6 /* AgentChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentChatView.swift; sourceTree = "<group>"; };
 		3BB8F2EF75E8086506400E58 /* GrokVoiceSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrokVoiceSession.swift; sourceTree = "<group>"; };
 		41C4271FB4949524CC6F4A9F /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		46DF6A4FE5F4CDAD72FA77FC /* ConnectionConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionConfiguration.swift; sourceTree = "<group>"; };
@@ -53,11 +57,13 @@
 		7DF97C6A4A405A68F94FCF37 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		8BD487FFADA4E17941B2E7F0 /* VoiceBootstrapClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceBootstrapClient.swift; sourceTree = "<group>"; };
 		AC26C500D21B32B7498A8503 /* PushManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushManager.swift; sourceTree = "<group>"; };
+		B9119C0E74D674E40C1F137B /* HostedAgentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedAgentStore.swift; sourceTree = "<group>"; };
 		B9E51FD459E01545DCFFC6CA /* AgentCallerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCallerApp.swift; sourceTree = "<group>"; };
 		BB9D3409104D81E3DEEC1254 /* CallCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallCoordinator.swift; sourceTree = "<group>"; };
 		C5E771A6258E6D9851018FBE /* AgentCaller.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AgentCaller.entitlements; sourceTree = "<group>"; };
 		CEF39272247BF60214A0BEF2 /* AgentSetupInstructions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSetupInstructions.swift; sourceTree = "<group>"; };
 		D0EBBE46B1E251BF0EEAEB2D /* IncomingCallTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncomingCallTests.swift; sourceTree = "<group>"; };
+		D306AE2175FA158778C83C07 /* HostedAgentClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedAgentClient.swift; sourceTree = "<group>"; };
 		DBDEE5828ADFB40734012264 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DF0D60EB0139343478B029DA /* AgentCaller.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AgentCaller.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E50A8BDB3472348304AF8F22 /* RealtimeAudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeAudioEngine.swift; sourceTree = "<group>"; };
@@ -84,6 +90,7 @@
 			children = (
 				C5E771A6258E6D9851018FBE /* AgentCaller.entitlements */,
 				B9E51FD459E01545DCFFC6CA /* AgentCallerApp.swift */,
+				1A4F453B7801FEBB521843C6 /* AgentChatView.swift */,
 				CEF39272247BF60214A0BEF2 /* AgentSetupInstructions.swift */,
 				41C4271FB4949524CC6F4A9F /* AppDelegate.swift */,
 				DBDEE5828ADFB40734012264 /* Assets.xcassets */,
@@ -95,6 +102,8 @@
 				66E4EA04E64A4C94B7A56C6B /* ConnectionView.swift */,
 				3BB8F2EF75E8086506400E58 /* GrokVoiceSession.swift */,
 				F3C375C57AFBACC122956474 /* HermesApprovals.swift */,
+				D306AE2175FA158778C83C07 /* HostedAgentClient.swift */,
+				B9119C0E74D674E40C1F137B /* HostedAgentStore.swift */,
 				7262E5F4AD2767721904F981 /* IncomingCall.swift */,
 				7DF97C6A4A405A68F94FCF37 /* Info.plist */,
 				0CF3EB5A26F4E48F88EEC6BD /* LiveVoiceSession.swift */,
@@ -239,6 +248,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A3E5DC05BB8F22EDA3D90BFC /* AgentCallerApp.swift in Sources */,
+				002961A6A8D27A07483AA7DA /* AgentChatView.swift in Sources */,
 				957F2B184857FB30AA060459 /* AgentSetupInstructions.swift in Sources */,
 				43D143C8E4224A4FB867E78D /* AppDelegate.swift in Sources */,
 				8BB04FB27ABD62C254BC1FAC /* CallCoordinator.swift in Sources */,
@@ -249,6 +259,8 @@
 				7E491E0ABAF39C4DE5FFACF3 /* ConnectionView.swift in Sources */,
 				93B6AC5C10468C268DBE473D /* GrokVoiceSession.swift in Sources */,
 				FC425AEA00CA433F030C2146 /* HermesApprovals.swift in Sources */,
+				63C1788360A479D73FCF9D42 /* HostedAgentClient.swift in Sources */,
+				9320A32AB436A2DCD0A9FFEA /* HostedAgentStore.swift in Sources */,
 				8A0FDC18565039B45ED5D805 /* IncomingCall.swift in Sources */,
 				C6F212A4C1E8320961EBBF85 /* LiveVoiceSession.swift in Sources */,
 				BFE72835A882B0597F91A3C7 /* PushManager.swift in Sources */,
