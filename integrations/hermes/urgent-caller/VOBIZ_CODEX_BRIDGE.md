@@ -155,8 +155,32 @@ verifies a `gpt-6-sol` thread, performs a ChatGPT-authenticated synthetic
 WebRTC SDP/ICE exchange, and requires nonzero audio before exposing
 `codex_ready: true`. This startup check proves the configured Sol thread and
 voice transport; it does not exercise a substantive backend handoff. Each
-actual call still has its own
-SDP/ICE/media exchange.
+actual call still has its own SDP/ICE/media exchange.
+As soon as the bridge verifies the signed WebSocket token and Vobiz `start`
+frame format, it plays a paced, clearly audible in-call connecting tone while
+checking the Worker call record, claiming the call, and starting that call's
+Codex GPT Live session. The bridge verifies the provider call ID against the
+Worker record before starting Codex. The tone
+uses the [published Indian local ringing cadence](https://www.itu.int/dms_pub/itu-t/opb/sp/T-SP-E.180-2010-PDF-E.pdf)
+(400 Hz with 25 Hz modulation, 0.4 s on, 0.2 s off, 0.4 s on, 2.0 s off).
+It uses 50 ms raw L16 chunks at 24 kHz. Before sending the first model speech
+frame, the bridge sends `clearAudio` and waits for Vobiz's `clearedAudio`
+acknowledgement, so the greeting does not race a queued tone. A
+caller hangup or failed session stops the tone. This tone is played **after the
+PSTN call is answered**; the carrier controls the true ringback before answer.
+The bridge begins the Live session at the earliest authenticated media event
+available in this Vobiz path, not when the phone first starts ringing.
+
+Vobiz documents [`StartApp`](https://www.vobiz.ai/docs/concepts/callbacks) at
+answer and executes [`<Stream>`](https://www.vobiz.ai/docs/xml/stream) after
+the Answer URL returns XML. Its [early-media `<PreAnswer>`](https://www.vobiz.ai/docs/xml/preanswer)
+can play static audio before formal answer on supported SIP routes, but cannot
+contain `<Stream>` and may run only after answer on unsupported routes. The
+Voice Application has no separately documented pre-answer webhook to
+authenticate an incoming DID call and initialize GPT Live while network
+ringback is still playing. The actual DID and carrier path need a live trace
+before any stronger timing claim or early-media rollout.
+
 The bridge ends an idle answered call after 45 seconds without speech and
 enforces a 180-second answered-call limit. On idle end, it checkpoints the
 final playback, waits up to four seconds for Vobiz `playedStream`, then sends
@@ -199,6 +223,12 @@ tools or private context. Inbound callers hear a fixed greeting that identifies
 the speaker as Chirag's AI assistant and offers to take a message. Caller ID
 is unverified; the assistant must not claim Chirag is busy or available, promise
 a callback, disclose private information, or take actions requested by callers.
+After the fixed English opening, the assistant is instructed to continue in
+the caller's language when it understands it, ask for clarification otherwise,
+and preserve the caller's own words in its bounded report. Outbound calls
+likewise adapt to the recipient's language after the approved opening. This is
+a prompt behavior, not a guarantee of proficiency in every language; the live DID test
+must include the languages Chirag expects to receive.
 
 If the optional Caller relay URL and token are present, a completed inbound
 call queues one durable outbox item. The bridge delivers one idempotent

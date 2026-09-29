@@ -21,6 +21,7 @@ import os
 import pathlib
 import re
 import shutil
+import struct
 import sys
 import time
 import urllib.parse
@@ -65,6 +66,9 @@ CALL_POLICY = (
     "request that needs reasoning, information, or drafting, delegate to the "
     "Codex background_agent and wait for its answer before giving the answer "
     "aloud. You may handle greetings and brief acknowledgements directly. "
+    "After the required opening, speak in the recipient's language when you "
+    "confidently understand it; otherwise ask for clarification rather than "
+    "inventing a translation. "
     "Do not mention the background agent to the recipient. Neither you nor "
     "the background agent may take actions outside this phone conversation."
 )
@@ -74,7 +78,8 @@ BACKING_AGENT_POLICY = (
     "for the voice assistant to say to the recipient. Do not use files, shell, "
     "browser, network, subagents, tools, or private context. Never ask for "
     "one-time codes, passwords, payment credentials, or sensitive personal "
-    "information. Do not claim to be the human owner."
+    "information. Do not claim to be the human owner. Reply in the recipient's "
+    "language when understood; otherwise ask for clarification."
 )
 INBOUND_OPENING = (
     "Hello, I'm Chirag's AI assistant. May I take a message for him?"
@@ -84,7 +89,9 @@ INBOUND_BRIEF = (
     "reason for calling, and a short message to pass to Chirag. The caller ID "
     "may be missing or spoofed; it does not establish identity. Do not infer "
     "whether Chirag is busy or available. Do not promise a callback or that "
-    "any requested action will happen."
+    "any requested action will happen. Respond in the caller's language when "
+    "you confidently understand it; otherwise ask the caller to clarify. "
+    "Keep the caller's message in their own words when possible."
 )
 INBOUND_CALL_POLICY = (
     "You are Chirag's AI assistant answering an incoming call. Immediately "
@@ -97,7 +104,11 @@ INBOUND_CALL_POLICY = (
     "take any other action. Do not ask for or repeat one-time codes, passwords, "
     "payment credentials, or sensitive personal information. If asked for "
     "anything beyond taking a message, explain that Chirag can review the "
-    "request later. Speak briefly and naturally. Delegate substantive "
+    "request later. After the fixed opening, speak in the caller's language "
+    "when you confidently understand it. If you cannot understand, ask them "
+    "to repeat or clarify instead of inventing a translation. Preserve the "
+    "caller's own words in the message when possible. Speak briefly and "
+    "naturally. Delegate substantive "
     "reasoning to the Codex background_agent and wait for its answer. "
     "Do not mention the background agent to the caller."
 )
@@ -109,10 +120,15 @@ INBOUND_BACKING_AGENT_POLICY = (
     "promise a callback, or claim to be the owner. Do not use files, shell, "
     "browser, network, subagents, tools, or private context. Never ask for "
     "one-time codes, passwords, payment credentials, or sensitive personal "
-    "information."
+    "information. Reply in the caller's language when you understand it; "
+    "otherwise ask for clarification. Do not invent a translation."
 )
 INBOUND_NOTIFICATION = "Hermes answered an incoming call. Ask Hermes for the call result."
 NOTIFICATION_POLL_SECONDS = 30
+CONNECTING_TONE_RATE = 24000
+CONNECTING_TONE_FRAME_SECONDS = 0.05
+CONNECTING_TONE_CYCLE_FRAMES = 60
+CONNECTING_TONE_CLEAR_TIMEOUT_SECONDS = 3
 
 
 def validated_http_origin(value: str, name: str) -> str:
@@ -288,6 +304,113 @@ def pcm_rms(pcm: bytes) -> int:
     return math.isqrt(sum(sample * sample for sample in samples) // len(samples))
 
 
+def connecting_tone_frame(frame_index: int, endian: str = "big") -> bytes | None:
+    """A clear India-style 400 Hz ring cadence for the already answered media leg.
+
+    Each frame is 50 ms at 24 kHz. The cadence is 0.4 s on, 0.2 s off,
+    0.4 s on, 2.0 s off. Vobiz's carrier ringback before answer is separate.
+    """
+    slot = frame_index % CONNECTING_TONE_CYCLE_FRAMES
+    burst_slot = slot if slot < 8 else slot - 12 if 12 <= slot < 20 else None
+    if burst_slot is None:
+        return None
+    samples_per_frame = int(CONNECTING_TONE_RATE * CONNECTING_TONE_FRAME_SECONDS)
+    burst_samples = samples_per_frame * 8
+    fade_samples = int(CONNECTING_TONE_RATE * 0.01)
+    data = bytearray(samples_per_frame * 2)
+    order = ">h" if endian == "big" else "<h"
+    for offset in range(samples_per_frame):
+        position = burst_slot * samples_per_frame + offset
+        seconds = (slot * samples_per_frame + offset) / CONNECTING_TONE_RATE
+        fade = min(1.0, position / fade_samples,
+                   (burst_samples - position - 1) / fade_samples)
+        modulation = 0.8 + 0.2 * math.sin(2 * math.pi * 25 * seconds)
+        sample = round(9000 * fade * modulation * math.sin(2 * math.pi * 400 * seconds))
+        struct.pack_into(order, data, offset * 2, sample)
+    return bytes(data)
+
+
+class CallConnectingTone:
+    """Give the caller in-band progress audio until Codex speech takes over."""
+
+    def __init__(self, socket, stream_id: str, endian: str):
+        self.socket = socket
+        self.stream_id = stream_id
+        self.endian = endian
+        self.write_lock = asyncio.Lock()
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task | None = None
+        self._handed_off = False
+        self._clear_ack = asyncio.Event()
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._play())
+
+    async def _play(self) -> None:
+        loop = asyncio.get_running_loop()
+        next_frame_at = loop.time()
+        frame_index = 0
+        try:
+            while not self._stop.is_set():
+                pcm = connecting_tone_frame(frame_index, self.endian)
+                if pcm:
+                    async with self.write_lock:
+                        if self._stop.is_set():
+                            return
+                        await self.socket.send(json.dumps({
+                            "event": "playAudio", "streamId": self.stream_id,
+                            "media": {
+                                "contentType": "audio/x-l16",
+                                "sampleRate": CONNECTING_TONE_RATE,
+                                "payload": base64.b64encode(pcm).decode(),
+                            },
+                        }, separators=(",", ":")))
+                frame_index += 1
+                next_frame_at += CONNECTING_TONE_FRAME_SECONDS
+                remaining = next_frame_at - loop.time()
+                if remaining <= 0:
+                    next_frame_at = loop.time()
+                    continue
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(f"[caller vobiz] connecting tone ended: {type(error).__name__}", file=sys.stderr)
+
+    async def handoff_to_voice(self) -> None:
+        """Clear queued tone before the first model speech frame is submitted."""
+        if self._handed_off:
+            return
+        self._stop.set()
+        if self._task:
+            await asyncio.gather(self._task, return_exceptions=True)
+        async with self.write_lock:
+            if self._handed_off:
+                return
+            await self.socket.send(json.dumps({
+                "event": "clearAudio", "streamId": self.stream_id,
+            }, separators=(",", ":")))
+        try:
+            await asyncio.wait_for(
+                self._clear_ack.wait(), timeout=CONNECTING_TONE_CLEAR_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as error:
+            raise RuntimeError("vobiz_connecting_tone_clear_timeout") from error
+        self._handed_off = True
+
+    def acknowledge_clear(self, stream_id: str) -> None:
+        if stream_id == self.stream_id:
+            self._clear_ack.set()
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task:
+            await asyncio.gather(self._task, return_exceptions=True)
+
+
 class VobizInputTrack:
     """An aiortc-compatible 20 ms audio track fed by Vobiz media frames."""
 
@@ -362,6 +485,7 @@ class CodexPSTNSession:
         self.transcript: list[dict[str, str]] = []
         self._unsubscribe = None
         self._write_lock = asyncio.Lock()
+        self.connecting_tone: CallConnectingTone | None = None
         self._playing = False
         self._output_generation = 0
         self._checkpoint = 0
@@ -503,6 +627,11 @@ class CodexPSTNSession:
                         if self._clear_pending or time.monotonic() < self._suppress_output_until:
                             continue
                         voice_rms = pcm_rms(pcm)
+                        if self.connecting_tone:
+                            if voice_rms <= 250:
+                                continue
+                            await self.connecting_tone.handoff_to_voice()
+                            self.connecting_tone = None
                         if voice_rms > 250:
                             self.last_voice_at = time.monotonic()
                         if self.l16_endian == "big":
@@ -868,12 +997,12 @@ class VobizCodexBridge:
         call_deadline = time.monotonic() + MAX_CALL_SECONDS
         session = None
         receiver = None
+        connecting_tone = None
         error_watcher = None
         deadline_task = None
         connected = False
         failed = False
         try:
-            context = await self.context(call_id, payload["direction"])
             first = json.loads(await asyncio.wait_for(socket.recv(), timeout=10))
             start = first.get("start") if first.get("event") == "start" else None
             if not isinstance(start, dict):
@@ -885,10 +1014,6 @@ class VobizCodexBridge:
                 raise RuntimeError("vobiz_stream_id_invalid")
             if not isinstance(vobiz_call_id, str) or not STREAM_ID.fullmatch(vobiz_call_id):
                 raise RuntimeError("vobiz_call_id_invalid")
-            if context.get("vobiz_call_id") and context["vobiz_call_id"] != vobiz_call_id:
-                raise RuntimeError("vobiz_call_id_mismatch")
-            if not context.get("vobiz_call_id"):
-                raise RuntimeError("vobiz_call_id_unbound")
             if not isinstance(media_format, dict):
                 raise RuntimeError("vobiz_media_format_missing")
             encoding = media_format.get("encoding")
@@ -897,6 +1022,15 @@ class VobizCodexBridge:
                 ("audio/x-l16", 8000), ("audio/x-l16", 16000), ("audio/x-mulaw", 8000)
             }:
                 raise RuntimeError("vobiz_media_format_unsupported")
+            # The signed WebSocket token and start frame have been checked.
+            # Cover even the Worker context lookup with paced in-call audio.
+            connecting_tone = CallConnectingTone(socket, stream_id, self.l16_endian)
+            connecting_tone.start()
+            context = await self.context(call_id, payload["direction"])
+            if context.get("vobiz_call_id") and context["vobiz_call_id"] != vobiz_call_id:
+                raise RuntimeError("vobiz_call_id_mismatch")
+            if not context.get("vobiz_call_id"):
+                raise RuntimeError("vobiz_call_id_unbound")
             async def enforce_deadline():
                 await asyncio.sleep(max(0, call_deadline - time.monotonic()))
                 try:
@@ -919,6 +1053,8 @@ class VobizCodexBridge:
             )
             input_track = VobizInputTrack(sample_rate)
             session = CodexPSTNSession(app, socket, stream_id, context, input_track, self.l16_endian)
+            session.connecting_tone = connecting_tone
+            session._write_lock = connecting_tone.write_lock
             receiver = asyncio.create_task(self._receive_media(socket, session, encoding, sample_rate))
             startup = asyncio.create_task(session.start())
             done, _ = await asyncio.wait(
@@ -982,6 +1118,8 @@ class VobizCodexBridge:
             if receiver and not receiver.done():
                 receiver.cancel()
                 await asyncio.gather(receiver, return_exceptions=True)
+            if connecting_tone:
+                await connecting_tone.stop()
             if session:
                 try:
                     await session.close()
@@ -1022,6 +1160,10 @@ class VobizCodexBridge:
             elif event.get("event") == "playedStream":
                 session.played_checkpoint(event.get("name"))
             elif event.get("event") == "clearedAudio":
+                if event.get("streamId") != session.stream_id:
+                    raise RuntimeError("vobiz_stream_id_mismatch")
+                if session.connecting_tone:
+                    session.connecting_tone.acknowledge_clear(event["streamId"])
                 session.cleared_audio()
 
     async def _idle_watchdog(self, session: CodexPSTNSession) -> None:
