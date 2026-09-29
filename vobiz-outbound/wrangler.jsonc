@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "caller-vobiz-outbound",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": {
+    "enabled": false,
+    "logs": { "enabled": false },
+    "traces": { "enabled": false }
+  },
+  "secrets": {
+    "required": [
+      "HERMES_PSTN_TOKEN", "VOBIZ_BRIDGE_RELAY_TOKEN", "VOBIZ_BRIDGE_SECRET",
+      "VOBIZ_AUTH_ID", "VOBIZ_AUTH_TOKEN", "VOBIZ_NUMBER",
+      "VOBIZ_PUBLIC_BASE_URL", "VOBIZ_BRIDGE_WSS_URL", "VOBIZ_OUTBOUND_ENABLED",
+      "VOBIZ_ALLOWED_DESTINATIONS"
+    ]
+  },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "caller-vobiz-outbound",
+    "database_id": "6a478995-5ebf-4d77-a7e5-3a7d700e4a91",
+    "migrations_dir": "migrations"
+  }]
+}
