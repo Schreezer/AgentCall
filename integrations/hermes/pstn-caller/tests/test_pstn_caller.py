@@ -291,6 +291,42 @@ class PstnCallerTests(unittest.TestCase):
                 with self.assertRaisesRegex(module.PstnRelayError, "invalid inbound inbox"):
                     module.inbox(module.argparse.Namespace())
 
+    def test_inbound_digest_reads_at_most_selected_calls_without_dialing(self):
+        requests = []
+
+        def send(request, timeout):
+            self.assertEqual(timeout, 15)
+            self.assertEqual(request.get_method(), "GET")
+            requests.append(request.full_url)
+            if request.full_url.endswith("/v1/inbound-calls"):
+                return Response({"calls": [
+                    {"id": "pstn_12345678", "direction": "inbound", "status": "completed"},
+                    {"id": "pstn_87654321", "direction": "inbound", "status": "completed"},
+                ]})
+            return Response({
+                "id": "pstn_12345678", "direction": "inbound", "status": "completed",
+                "inbound_report": "Caller said: My reason is to ask about lunch.",
+            })
+
+        with patch.dict(module.os.environ, {"HERMES_PSTN_RELAY_URL": "https://relay.example", "HERMES_PSTN_TOKEN": "secret"}):
+            with patch.object(module, "runtime_config", return_value={}), patch.object(module.urllib.request, "build_opener") as build:
+                build.return_value.open.side_effect = send
+                result = module.inbound_digest(module.argparse.Namespace(limit=1))
+        self.assertEqual(requests, [
+            "https://relay.example/v1/inbound-calls",
+            "https://relay.example/v1/inbound-calls/pstn_12345678",
+        ])
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["report_source"], "unverified caller speech")
+        self.assertEqual(result["calls"][0]["inbound_report"], "Caller said: My reason is to ask about lunch.")
+
+    def test_inbound_digest_rejects_unbounded_limit_before_network(self):
+        for limit in (0, 6):
+            with self.subTest(limit=limit), patch.object(module, "inbox") as inbox:
+                with self.assertRaisesRegex(module.PstnRelayError, "1 to 5"):
+                    module.inbound_digest(module.argparse.Namespace(limit=limit))
+                inbox.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

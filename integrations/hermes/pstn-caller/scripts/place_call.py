@@ -258,6 +258,19 @@ def inbound_status(args):
     return inbound_call(result, detailed=True)
 
 
+def inbound_digest(args):
+    """Read a small set of recent caller reports for the default Hermes profile."""
+    if not 1 <= args.limit <= 5:
+        raise PstnRelayError("Inbound digest limit must be 1 to 5 calls")
+    recent = inbox(args)
+    selected = recent["calls"][:args.limit]
+    return {
+        "calls": [inbound_status(argparse.Namespace(id=call["id"])) for call in selected],
+        "truncated": recent["truncated"] or len(recent["calls"]) > args.limit,
+        "report_source": "unverified caller speech",
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Place a Codex-only PSTN call or inspect calls through the private relay")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -275,10 +288,13 @@ def main(argv=None):
     subcommands.add_parser("inbox", help="List recent inbound calls without dialing")
     inbound_parser = subcommands.add_parser("inbound-status", help="Inspect one inbound call without dialing")
     inbound_parser.add_argument("--id", required=True)
+    digest_parser = subcommands.add_parser("inbound-digest", help="Read up to five recent caller reports without dialing")
+    digest_parser.add_argument("--limit", type=int, default=5)
     args = parser.parse_args(argv)
     try:
         result = {"start": start, "status": status, "wait": wait,
-                  "inbox": inbox, "inbound-status": inbound_status}[args.command](args)
+                  "inbox": inbox, "inbound-status": inbound_status,
+                  "inbound-digest": inbound_digest}[args.command](args)
     except PstnRelayError as error:
         print(str(error), file=sys.stderr)
         return 1
