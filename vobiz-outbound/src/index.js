@@ -3,6 +3,8 @@ const CALLBACK_BYTES = 16_384;
 const MAX_CALL_MS = 3 * 60_000;
 const MAX_OPENING_SPEECH_CHARS = 320;
 const OUTBOUND_OPENING = "Hello, I'm Chirag's AI assistant, calling on his behalf. Is this a good time?";
+const INBOUND_OPENING = "Hello, I'm Chirag's AI assistant. May I take a message for him?";
+const INBOUND_INSTRUCTIONS = "Answer as Chirag's AI assistant, identify yourself as AI, and take a message for Chirag. Do not claim to be Chirag, verify a caller's identity from caller ID, or disclose private information.";
 
 function callbackConfigured(env) {
   return Boolean(
@@ -16,6 +18,11 @@ function callbackConfigured(env) {
 function outboundConfigured(env) {
   return env.VOBIZ_OUTBOUND_ENABLED === "true" && callbackConfigured(env) &&
     Boolean(env.HERMES_PSTN_TOKEN && env.VOBIZ_ALLOWED_DESTINATIONS);
+}
+
+function inboundConfigured(env) {
+  return callbackConfigured(env) &&
+    Boolean(env.HERMES_PSTN_TOKEN && normalizedNumber(env.VOBIZ_NUMBER));
 }
 
 function json(status, body) {
@@ -67,6 +74,14 @@ function normalizedCallbackNumber(value) {
   return normalizedNumber(number);
 }
 
+function normalizedInboundCaller(value) {
+  if (typeof value !== "string") return null;
+  const number = value.trim().replace(/[ ()-]/g, "");
+  if (/^[1-9]\d{9}$/.test(number)) return `+91${number}`;
+  if (/^91[1-9]\d{9}$/.test(number)) return `+${number}`;
+  return /^\+[1-9]\d{6,14}$/.test(number) ? number : null;
+}
+
 function normalizedOpeningSpeech(value) {
   if (typeof value !== "string") return null;
   const speech = value.normalize("NFC").replace(/[\t\r\n ]+/g, " ").trim();
@@ -100,11 +115,24 @@ function publicCall(row) {
     id: row.id,
     direction: row.direction,
     status: row.status,
+    provider_status: row.provider_status,
     from_number: row.from_number,
     to_number: row.to_number,
     summary: row.summary,
+    delivery_status: row.delivery_status || "unknown",
+    acknowledgement_status: row.acknowledgement_status || "unknown",
+    outcome_evidence: row.outcome_evidence || null,
     created_at: row.created_at,
     ended_at: row.ended_at,
+  };
+}
+
+function publicInboundCall(row, detail = false) {
+  return {
+    ...publicCall(row),
+    caller_number: row.from_number,
+    called_number: row.to_number,
+    ...(detail ? { inbound_report: row.inbound_report, source_type: "unknown" } : {}),
   };
 }
 
@@ -144,16 +172,17 @@ function streamXML(url) {
   return `<?xml version="1.0" encoding="UTF-8"?><Response><Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-l16;rate=16000">${escaped}</Stream></Response>`;
 }
 
-async function bridgeReady(env, fetcher = fetch) {
+async function bridgeReady(env, fetcher = fetch, timeoutMs = 2_000, inbound = false) {
   const url = bridgeURL(env);
   if (!url) return false;
   url.protocol = "https:";
   url.pathname = url.pathname.replace(/\/[^/]*$/, "/health");
   try {
-    const response = await fetcher(url.toString(), { signal: AbortSignal.timeout(2_000) });
+    const response = await fetcher(url.toString(), { signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) return false;
     const state = await response.json();
-    return state?.ok === true && state?.codex_ready === true;
+    return state?.ok === true && state?.codex_ready === true &&
+      (!inbound || state?.inbound_enabled === true);
   } catch (error) {
     console.error(JSON.stringify({ message: "Vobiz Codex bridge health unavailable", error: String(error) }));
     return false;
@@ -200,7 +229,10 @@ export async function createPstnCall(request, env, fetcher = fetch) {
   const active = await env.DB.prepare(
     `SELECT id FROM vobiz_pstn_calls WHERE ended_at IS NULL
        AND status IN ('dispatching', 'queued', 'ringing', 'connected', 'dispatch_unknown')
-       AND created_at > ?1 LIMIT 1`,
+       AND created_at > ?1
+     UNION ALL
+     SELECT id FROM vobiz_inbound_calls WHERE ended_at IS NULL
+       AND status = 'connected' AND created_at > ?1 LIMIT 1`,
   ).bind(activeAfter).first();
   if (active) {
     const raced = await env.DB.prepare(
@@ -224,6 +256,9 @@ export async function createPstnCall(request, env, fetcher = fetch) {
          SELECT 1 FROM vobiz_pstn_calls WHERE ended_at IS NULL
            AND status IN ('dispatching', 'queued', 'ringing', 'connected', 'dispatch_unknown')
            AND created_at > ?10
+       ) AND NOT EXISTS (
+         SELECT 1 FROM vobiz_inbound_calls WHERE ended_at IS NULL
+           AND status = 'connected' AND created_at > ?10
        )
      ON CONFLICT(idempotency_key) DO NOTHING`,
   ).bind(id, from, to, briefing, openingSpeech,
@@ -301,6 +336,21 @@ export async function getPstnCall(env, callID) {
   return row ? json(200, publicCall(row)) : json(404, { error: "call_not_found" });
 }
 
+export async function listInboundCalls(env) {
+  const result = await env.DB.prepare(
+    "SELECT * FROM vobiz_inbound_calls ORDER BY created_at DESC LIMIT 20",
+  ).all();
+  return json(200, { calls: result.results.map((row) => publicInboundCall(row)) });
+}
+
+export async function getInboundCall(env, callID) {
+  if (!isUUID(callID)) return json(404, { error: "call_not_found" });
+  const row = await env.DB.prepare(
+    "SELECT * FROM vobiz_inbound_calls WHERE id = ?1",
+  ).bind(callID.toLowerCase()).first();
+  return row ? json(200, publicInboundCall(row, true)) : json(404, { error: "call_not_found" });
+}
+
 async function boundedText(request, limit) {
   const header = request.headers.get("content-length");
   if (header && Number(header) > limit) throw new Error("body_too_large");
@@ -323,13 +373,14 @@ async function boundedText(request, limit) {
   }
 }
 
-async function verifiedCallback(request, env) {
+async function verifiedCallback(request, env, requireSignature = false) {
   const origin = baseURL(env);
   const url = new URL(request.url);
   if (!origin || url.origin !== origin || url.search || url.hash) return null;
   // Legacy V1 and MA-only headers do not imply a standard V2/V3 signature is present.
   const hasSignatureHeader = request.headers.has("x-vobiz-signature-v3") ||
     request.headers.has("x-vobiz-signature-v2");
+  if (requireSignature && !hasSignatureHeader) return null;
   let nonce = null;
   if (hasSignatureHeader) {
     const version = request.headers.has("x-vobiz-signature-v3") ? "v3" : "v2";
@@ -360,24 +411,29 @@ async function verifiedCallback(request, env) {
   const params = new URLSearchParams(raw);
   if (params.get("auth_id") !== env.VOBIZ_AUTH_ID || !isUUID(params.get("CallUUID"))) return null;
   if (nonce) {
+    // Inbound Answer URLs are fixed and have no per-call secret. Retain their signed
+    // nonces so a captured URL signature cannot be reused with a new form body later.
+    const nonceTable = requireSignature ? "vobiz_inbound_callback_nonces" : "vobiz_callback_nonces";
     const bodyHash = await hashCredential(raw);
     const pathHash = await hashCredential(url.pathname);
     const reserved = await env.DB.prepare(
-      `INSERT INTO vobiz_callback_nonces (nonce, path_hash, body_hash, received_at)
+      `INSERT INTO ${nonceTable} (nonce, path_hash, body_hash, received_at)
        VALUES (?1, ?2, ?3, ?4) ON CONFLICT(nonce) DO NOTHING`,
     ).bind(nonce, pathHash, bodyHash, Date.now()).run();
     if (!reserved.meta.changes) {
       const prior = await env.DB.prepare(
-        "SELECT path_hash, body_hash FROM vobiz_callback_nonces WHERE nonce = ?1",
+        `SELECT path_hash, body_hash FROM ${nonceTable} WHERE nonce = ?1`,
       ).bind(nonce).first();
       if (prior?.path_hash !== pathHash || prior?.body_hash !== bodyHash) return null;
     }
-    // Nonces need only outlive Vobiz's callback retry window. Keep this bounded without a cron trigger.
-    try {
-      await env.DB.prepare("DELETE FROM vobiz_callback_nonces WHERE received_at < ?1")
-        .bind(Date.now() - 24 * 60 * 60_000).run();
-    } catch {
-      console.error(JSON.stringify({ message: "Vobiz callback nonce cleanup failed" }));
+    if (!requireSignature) {
+      // Outbound callbacks also carry a unique per-call URL token.
+      try {
+        await env.DB.prepare("DELETE FROM vobiz_callback_nonces WHERE received_at < ?1")
+          .bind(Date.now() - 24 * 60 * 60_000).run();
+      } catch {
+        console.error(JSON.stringify({ message: "Vobiz callback nonce cleanup failed" }));
+      }
     }
   }
   return params;
@@ -458,26 +514,179 @@ export async function handleVobizCallback(request, env, kind, callID, callbackTo
   return callbackAcknowledged();
 }
 
-export async function getBridgeCall(env, callID) {
-  if (!isUUID(callID)) return json(404, { error: "call_not_found" });
-  const row = await env.DB.prepare(
+const HANGUP_XML = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
+
+function oneParameter(params, name) {
+  const values = params.getAll(name);
+  return values.length === 1 ? values[0] : null;
+}
+
+function inboundCallbackFields(params, kind, env) {
+  const expectedEvent = kind === "answer" ? "StartApp" : "Hangup";
+  const providerUUID = oneParameter(params, "CallUUID");
+  const calledNumber = normalizedCallbackNumber(oneParameter(params, "To"));
+  const fromValues = params.getAll("From");
+  if (oneParameter(params, "Event") !== expectedEvent ||
+      oneParameter(params, "Direction")?.toLowerCase() !== "inbound" ||
+      oneParameter(params, "auth_id") !== env.VOBIZ_AUTH_ID ||
+      !isUUID(providerUUID) || calledNumber !== normalizedNumber(env.VOBIZ_NUMBER) ||
+      fromValues.length > 1) return null;
+  return {
+    providerUUID: providerUUID.toLowerCase(),
+    calledNumber,
+    callerNumber: normalizedInboundCaller(fromValues[0]),
+  };
+}
+
+function inboundProviderStatus(params) {
+  const callStatus = String(params.get("CallStatus") || params.get("Status") || "")
+    .trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+  const hangupCause = String(params.get("HangupCause") || "")
+    .trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "_");
+  return [callStatus, hangupCause].filter(Boolean).join(":").slice(0, 80) || "hangup";
+}
+
+export async function handleInboundCallback(request, env, kind, fetcher = fetch) {
+  if (!["answer", "hangup"].includes(kind)) return json(404, { error: "not_found" });
+  if (!inboundConfigured(env) || !baseURL(env) || !bridgeURL(env)) {
+    return json(503, { error: "vobiz_inbound_not_configured" });
+  }
+  // Voice Application URLs are fixed, so every inbound callback must have a V2/V3 HMAC.
+  // Vobiz signs URL + nonce, not the form body; the nonce table binds each retry to its first body.
+  const params = await verifiedCallback(request, env, true);
+  if (!params) return json(403, { error: "invalid_vobiz_callback" });
+  const fields = inboundCallbackFields(params, kind, env);
+  if (!fields) return json(403, { error: "vobiz_inbound_call_mismatch" });
+  if (env.VOBIZ_INBOUND_ENABLED !== "true") {
+    const now = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO vobiz_inbound_calls
+         (id, direction, from_number, to_number, status, provider_status,
+          vobiz_call_uuid, created_at, updated_at, ended_at)
+       VALUES (?1, 'inbound', NULL, ?2, 'blocked_disabled', ?3, ?4, ?5, ?5, ?5)
+       ON CONFLICT(vobiz_call_uuid) DO NOTHING`,
+    ).bind(crypto.randomUUID(), fields.calledNumber, `inbound_disabled:${kind}`,
+      fields.providerUUID, now).run();
+    return kind === "answer" ? xmlResponse(HANGUP_XML) : callbackAcknowledged();
+  }
+  let row = await env.DB.prepare(
+    "SELECT * FROM vobiz_inbound_calls WHERE vobiz_call_uuid = ?1",
+  ).bind(fields.providerUUID).first();
+  if (row && (row.to_number !== fields.calledNumber ||
+      (row.from_number && fields.callerNumber && row.from_number !== fields.callerNumber))) {
+    return json(403, { error: "vobiz_inbound_call_mismatch" });
+  }
+
+  if (kind === "answer") {
+    if (!row) {
+      const ready = await bridgeReady(env, fetcher, 1_200, true);
+      const now = Date.now();
+      if (ready) {
+        const activeAfter = now - MAX_CALL_MS - 60_000;
+        const inserted = await env.DB.prepare(
+          `INSERT INTO vobiz_inbound_calls
+             (id, direction, from_number, to_number, status, provider_status,
+              vobiz_call_uuid, created_at, updated_at)
+           SELECT ?1, 'inbound', ?2, ?3, 'connected', 'answered', ?4, ?5, ?5
+             WHERE NOT EXISTS (
+               SELECT 1 FROM vobiz_inbound_calls WHERE ended_at IS NULL
+                 AND status = 'connected' AND created_at > ?6
+             ) AND NOT EXISTS (
+               SELECT 1 FROM vobiz_pstn_calls WHERE ended_at IS NULL
+                 AND status IN ('dispatching', 'queued', 'ringing', 'connected', 'dispatch_unknown')
+                 AND created_at > ?6
+             )
+           ON CONFLICT(vobiz_call_uuid) DO NOTHING`,
+        ).bind(crypto.randomUUID(), fields.callerNumber, fields.calledNumber,
+          fields.providerUUID, now, activeAfter).run();
+        if (!inserted.meta.changes) {
+          await env.DB.prepare(
+            `INSERT INTO vobiz_inbound_calls
+               (id, direction, from_number, to_number, status, provider_status,
+                vobiz_call_uuid, created_at, updated_at, ended_at)
+             VALUES (?1, 'inbound', ?2, ?3, 'failed', 'another_call_active', ?4, ?5, ?5, ?5)
+             ON CONFLICT(vobiz_call_uuid) DO NOTHING`,
+          ).bind(crypto.randomUUID(), fields.callerNumber, fields.calledNumber,
+            fields.providerUUID, now).run();
+        }
+      } else {
+        await env.DB.prepare(
+          `INSERT INTO vobiz_inbound_calls
+             (id, direction, from_number, to_number, status, provider_status,
+              vobiz_call_uuid, created_at, updated_at, ended_at)
+           VALUES (?1, 'inbound', ?2, ?3, 'failed', 'codex_bridge_unavailable', ?4, ?5, ?5, ?5)
+           ON CONFLICT(vobiz_call_uuid) DO NOTHING`,
+        ).bind(crypto.randomUUID(), fields.callerNumber, fields.calledNumber,
+          fields.providerUUID, now).run();
+      }
+      row = await env.DB.prepare(
+        "SELECT * FROM vobiz_inbound_calls WHERE vobiz_call_uuid = ?1",
+      ).bind(fields.providerUUID).first();
+    }
+    if (!row || row.ended_at || row.status !== "connected") return xmlResponse(HANGUP_XML);
+    const stream = bridgeURL(env);
+    stream.searchParams.set("token", await bridgeToken(env.VOBIZ_BRIDGE_SECRET, row));
+    return xmlResponse(streamXML(stream.toString()));
+  }
+
+  const now = Date.now();
+  const providerStatus = inboundProviderStatus(params);
+  if (!row) {
+    await env.DB.prepare(
+      `INSERT INTO vobiz_inbound_calls
+         (id, direction, from_number, to_number, status, provider_status,
+          vobiz_call_uuid, created_at, updated_at, ended_at)
+       VALUES (?1, 'inbound', ?2, ?3, 'failed', ?4, ?5, ?6, ?6, ?6)
+       ON CONFLICT(vobiz_call_uuid) DO NOTHING`,
+    ).bind(crypto.randomUUID(), fields.callerNumber, fields.calledNumber,
+      providerStatus, fields.providerUUID, now).run();
+  } else {
+    await env.DB.prepare(
+      `UPDATE vobiz_inbound_calls
+          SET status = CASE
+                WHEN status = 'blocked_disabled' THEN 'blocked_disabled'
+                WHEN status = 'failed' OR bridge_terminal_event = 'failed' THEN 'failed'
+                WHEN bridge_connected_at IS NOT NULL OR bridge_terminal_event = 'ended' THEN 'completed'
+                ELSE 'failed' END,
+              provider_status = ?2, updated_at = ?3, ended_at = COALESCE(ended_at, ?3)
+        WHERE id = ?1`,
+    ).bind(row.id, providerStatus, now).run();
+  }
+  return callbackAcknowledged();
+}
+
+async function findBridgeCall(env, callID) {
+  const outbound = await env.DB.prepare(
     "SELECT * FROM vobiz_pstn_calls WHERE id = ?1",
   ).bind(callID.toLowerCase()).first();
+  if (outbound) return outbound;
+  return env.DB.prepare(
+    "SELECT * FROM vobiz_inbound_calls WHERE id = ?1",
+  ).bind(callID.toLowerCase()).first();
+}
+
+export async function getBridgeCall(env, callID) {
+  if (!isUUID(callID)) return json(404, { error: "call_not_found" });
+  const row = await findBridgeCall(env, callID);
   if (!row || row.ended_at || Date.now() - row.created_at > MAX_CALL_MS + 60_000) {
     return json(404, { error: "call_not_available" });
   }
   return json(200, {
     id: row.id, direction: row.direction,
     caller_number: row.from_number, destination_number: row.to_number,
-    instructions: row.instructions, opening_speech: row.opening_speech,
+    ...(row.direction === "inbound" ? { called_number: row.to_number, source_type: "unknown" } : {}),
+    instructions: row.direction === "inbound" ? INBOUND_INSTRUCTIONS : row.instructions,
+    opening_speech: row.direction === "inbound" ? INBOUND_OPENING : row.opening_speech,
     vobiz_call_id: row.vobiz_call_uuid,
   });
 }
 
 export async function claimBridgeCall(env, callID) {
   if (!isUUID(callID)) return json(404, { error: "call_not_found" });
+  const row = await findBridgeCall(env, callID);
+  const table = row?.direction === "inbound" ? "vobiz_inbound_calls" : "vobiz_pstn_calls";
   const claimed = await env.DB.prepare(
-    `UPDATE vobiz_pstn_calls SET bridge_claimed_at = ?2, updated_at = ?2
+    `UPDATE ${table} SET bridge_claimed_at = ?2, updated_at = ?2
       WHERE id = ?1 AND bridge_claimed_at IS NULL AND ended_at IS NULL
         AND status = 'connected' AND vobiz_call_uuid IS NOT NULL`,
   ).bind(callID.toLowerCase(), Date.now()).run();
@@ -493,9 +702,7 @@ function cleanSummary(value) {
 
 export async function bridgeCallEvent(request, env, callID) {
   if (!isUUID(callID)) return json(404, { error: "call_not_found" });
-  const row = await env.DB.prepare(
-    "SELECT * FROM vobiz_pstn_calls WHERE id = ?1",
-  ).bind(callID.toLowerCase()).first();
+  const row = await findBridgeCall(env, callID);
   if (!row) return json(404, { error: "call_not_found" });
   let body;
   try {
@@ -520,6 +727,34 @@ export async function bridgeCallEvent(request, env, callID) {
   }
   const status = body.event === "connected" ? "connected" : body.event === "ended" ? "completed" : "failed";
   const now = Date.now();
+  if (row.direction === "inbound") {
+    if (row.status === "blocked_disabled") return json(409, { error: "call_not_available" });
+    if (body.event !== "failed" && !row.bridge_claimed_at) {
+      return json(409, { error: "call_not_claimed" });
+    }
+    const reportText = body.event === "ended" && typeof body.inbound_report === "string"
+      ? cleanSummary(body.inbound_report) : null;
+    const report = reportText?.slice(0, 500) || null;
+    await env.DB.prepare(
+      `UPDATE vobiz_inbound_calls
+          SET status = CASE
+                WHEN bridge_terminal_event = 'failed' OR (?2 = 'failed' AND bridge_terminal_event = 'ended')
+                  THEN status
+                WHEN ?2 = 'connected' AND ended_at IS NOT NULL THEN status
+                ELSE ?2 END,
+              bridge_terminal_event = CASE
+                WHEN bridge_terminal_event IS NOT NULL THEN bridge_terminal_event
+                WHEN ?3 IN ('ended', 'failed') THEN ?3 ELSE NULL END,
+              bridge_connected_at = CASE WHEN ?3 = 'connected' AND ended_at IS NULL
+                THEN COALESCE(bridge_connected_at, ?6) ELSE bridge_connected_at END,
+              summary = COALESCE(?4, summary), inbound_report = COALESCE(?5, inbound_report),
+              updated_at = ?6,
+              ended_at = CASE WHEN ?2 IN ('completed', 'failed')
+                THEN COALESCE(ended_at, ?6) ELSE ended_at END
+        WHERE id = ?1`,
+    ).bind(row.id, status, body.event, summary, report, now).run();
+    return json(200, { ok: true });
+  }
   await env.DB.prepare(
     `UPDATE vobiz_pstn_calls
         SET status = CASE WHEN ended_at IS NULL THEN ?2 ELSE status END,
@@ -560,7 +795,13 @@ const worker = {
     try {
       if (request.method === "GET" && url.pathname === "/health") {
         await env.DB.prepare("SELECT id FROM vobiz_pstn_calls LIMIT 1").first();
+        await env.DB.prepare("SELECT id FROM vobiz_inbound_calls LIMIT 1").first();
         return json(200, { ok: true, service: "caller-vobiz-outbound", storage_ready: true });
+      }
+
+      const inboundCallback = url.pathname.match(/^\/v1\/vobiz\/inbound\/(answer|hangup)$/);
+      if (request.method === "POST" && inboundCallback) {
+        return await handleInboundCallback(request, env, inboundCallback[1]);
       }
 
       const callback = url.pathname.match(/^\/v1\/vobiz\/(answer|ring|hangup)\/([0-9a-f-]+)\/([A-Za-z0-9_-]{43})$/i);
@@ -576,6 +817,18 @@ const worker = {
       if (request.method === "GET" && call) {
         if (!(await validBearer(request, env.HERMES_PSTN_TOKEN))) return json(401, { error: "invalid_agent_credential" });
         return await getPstnCall(env, call[1]);
+      }
+
+      if (url.pathname === "/v1/inbound-calls" && request.method === "GET") {
+        if (!(await validBearer(request, env.HERMES_PSTN_TOKEN))) return json(401, { error: "invalid_agent_credential" });
+        if (url.search || url.hash) return json(400, { error: "unexpected_query" });
+        return await listInboundCalls(env);
+      }
+      const inboundCall = url.pathname.match(/^\/v1\/inbound-calls\/([0-9a-f-]+)$/i);
+      if (request.method === "GET" && inboundCall) {
+        if (!(await validBearer(request, env.HERMES_PSTN_TOKEN))) return json(401, { error: "invalid_agent_credential" });
+        if (url.search || url.hash) return json(400, { error: "unexpected_query" });
+        return await getInboundCall(env, inboundCall[1]);
       }
 
       const bridge = url.pathname.match(/^\/v1\/vobiz\/bridge\/calls\/([0-9a-f-]+)(?:\/(events|claim))?$/i);
