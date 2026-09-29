@@ -56,7 +56,7 @@ struct CallerSettingsView: View {
     private var connectionSection: some View {
         Section("Connection") {
             statusRow(
-                "Incoming calls",
+                "Caller app calls",
                 value: configuration.hasPushToken ? "Ready" : "Preparing",
                 ready: configuration.hasPushToken
             )
@@ -111,8 +111,9 @@ struct CallerSettingsView: View {
 
     private var privacySection: some View {
         Section("Privacy & permissions") {
-            Label("VoIP calls use Apple's incoming-call service. Notification permission is not required.", systemImage: "phone.connection.fill")
-            Label("Microphone access is not required for one-way spoken reminders.", systemImage: "mic.slash.fill")
+            Label("Live AI conversations use Apple's incoming-call service.", systemImage: "phone.connection.fill")
+            Label("One-way agent messages arrive as notifications and require notification permission.", systemImage: "bell.badge.fill")
+            Label("Cellular calls need separate carrier forwarding to reach your agent.", systemImage: "arrowshape.turn.up.right.fill")
             Label("Apple credentials and the phone's push token stay between Caller and the relay.", systemImage: "lock.shield.fill")
         }
     }
