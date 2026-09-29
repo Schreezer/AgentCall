@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0a1020" />
+    <meta name="description" content="A clear map of what Caller, Hermes, and the Vobiz phone bridge can do today, what is prepared, and what still needs a live rollout." />
+    <title>Caller × Hermes — what your agent can do</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script defer src="./script.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Caller capability map, back to top"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span>Caller<span class="brand-cross">×</span>Hermes</span></a>
+      <nav class="top-nav" aria-label="Page navigation">
+        <a href="#routes">Call routes</a>
+        <a href="#status">What is ready</a>
+        <a href="#setup">Setup</a>
+      </nav>
+      <a class="header-link" href="#status">View status <span aria-hidden="true">↗</span></a>
+    </header>
+
+    <main id="main">
+      <section class="hero wrap" id="top">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="eyebrow-line"></span> A personal calling system, explained</p>
+          <h1>Two ways for your agent to <em>reach you.</em></h1>
+          <p class="hero-lede">One route rings the Caller app on your iPhone. The other dials a real phone number through Vobiz. Incoming calls can eventually reach the same voice agent. Here is exactly which part works in code and which part still needs to go live.</p>
+          <p class="hero-live"><span class="hero-live-dot"></span><strong>App route exists</strong><span class="hero-live-divider">·</span>Direct phone bridge activation pending</p>
+          <div class="hero-actions">
+            <a class="button primary" href="#routes">Explore the routes <span aria-hidden="true">↗</span></a>
+            <a class="text-link" href="#status">See current readiness <span aria-hidden="true">↓</span></a>
+          </div>
+          <p class="snapshot"><span class="snapshot-dot"></span> Implementation snapshot · <time datetime="2026-09-29T18:39:00+05:30">29 September 2026, 18:39 IST</time> <span class="snapshot-sep">/</span> Not a live service monitor</p>
+        </div>
+        <div class="hero-visual" role="img" aria-label="Hermes at the center, connected to a Caller app call on the iPhone and a standard phone call through Vobiz">
+          <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+          <div class="hero-node node-hermes"><span class="node-icon">✳</span><strong>Hermes</strong><small>Your agent</small></div>
+          <div class="connector connector-app"></div><div class="connector connector-phone"></div>
+          <div class="hero-node node-app"><span class="node-icon">◉</span><strong>Caller app</strong><small>VoIP + CallKit</small></div>
+          <div class="hero-node node-phone"><span class="node-icon">☎</span><strong>Phone number</strong><small>Vobiz PSTN</small></div>
+          <div class="signal signal-a"></div><div class="signal signal-b"></div><div class="signal signal-c"></div>
+          <p class="visual-caption">Two routes. One clear instruction.</p>
+        </div>
+      </section>
+
+      <section class="status-banner" aria-label="Current activation status">
+        <div class="wrap status-banner-inner">
+          <span class="status-banner-icon" aria-hidden="true">i</span>
+          <p><strong>The new phone bridge is prepared, not active.</strong> DebianBat was offline at the last check. No live Vobiz call, incoming DID conversation, or Jio forwarding has been proven.</p>
+          <a href="#status">Why this matters <span aria-hidden="true">↗</span></a>
+        </div>
+      </section>
+
+      <section class="section wrap" id="routes">
+        <div class="section-head">
+          <p class="eyebrow">01 / Choose a route</p>
+          <h2>What happens when you ask Hermes to call?</h2>
+          <p>Tell Hermes which kind of call you want. The route changes what rings and what setup is needed.</p>
+        </div>
+        <div class="route-selector" aria-label="Explore calling situations">
+          <div class="route-tabs" role="tablist" aria-label="Calling situations">
+            <button id="tab-checkin" class="route-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="panel-checkin" data-panel="checkin"><span class="tab-number">01</span><span>Daily check-in</span></button>
+            <button id="tab-number" class="route-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-number" data-panel="number"><span class="tab-number">02</span><span>Dial my number</span></button>
+            <button id="tab-incoming" class="route-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-incoming" data-panel="incoming"><span class="tab-number">03</span><span>Incoming caller</span></button>
+          </div>
+          <div class="route-panels">
+            <article class="route-panel is-active" id="panel-checkin" role="tabpanel" aria-labelledby="tab-checkin">
+              <div class="route-panel-top"><span class="route-type">Scheduled by Hermes</span><span class="route-state existing">Existing Caller route</span></div>
+              <h3>“Call me every evening and ask what I ate.”</h3>
+              <p>Hermes needs a recurring schedule. When it fires, it can send a <strong>Caller live voice invite</strong> to the paired iPhone. You answer in the app’s CallKit screen and speak with the live agent.</p>
+              <div class="flow" aria-label="Daily check-in flow"><span>Hermes schedule</span><b>→</b><span>Caller relay</span><b>→</b><span>iPhone CallKit</span><b>→</b><span>Voice session</span></div>
+              <div class="route-note"><span>Good to know</span><p>A recurring schedule must be created in Hermes. Ask for a direct mobile-number check-in instead and that same schedule can use Vobiz once the phone route is activated. The app does not decide the time by itself.</p></div>
+            </article>
+            <article class="route-panel" id="panel-number" role="tabpanel" aria-labelledby="tab-number" hidden>
+              <div class="route-panel-top"><span class="route-type">Standard phone call</span><span class="route-state prepared">Built · activation pending</span></div>
+              <h3>“Call my mobile number directly.”</h3>
+              <p>Hermes’s new PSTN skill can request an outbound Vobiz call to an <strong>allowlisted Indian number</strong>. Your normal cellular phone rings, even without the Caller app installed. On answer, the Codex voice bridge joins the call.</p>
+              <div class="flow" aria-label="Phone number call flow"><span>Hermes</span><b>→</b><span>Vobiz Worker</span><b>→</b><span>Mobile number</span><b>→</b><span>GPT Live</span></div>
+              <div class="route-note"><span>Current limit</span><p>The relay is disabled and the bridge is not installed on DebianBat. “Queued” from Vobiz would mean it accepted a request, not that you answered. No live carrier call has been verified yet.</p></div>
+            </article>
+            <article class="route-panel" id="panel-incoming" role="tabpanel" aria-labelledby="tab-incoming" hidden>
+              <div class="route-panel-top"><span class="route-type">Agent answers first</span><span class="route-state prepared">Built · activation pending</span></div>
+              <h3>“Find out why someone is calling me.”</h3>
+              <p>A call to the Vobiz number can reach an AI disclosed message taker. It asks the caller’s name and purpose, stores a short redacted report, then queues a generic notification for a paired Caller app. You can ask Hermes to read the authenticated inbox.</p>
+              <div class="flow" aria-label="Incoming call flow"><span>Vobiz DID</span><b>→</b><span>Signed callback</span><b>→</b><span>GPT Live</span><b>→</b><span>Caller alert</span></div>
+              <div class="route-note"><span>Important limit</span><p>The DID is not attached and inbound is disabled. The existing iPhone app cannot intercept a cellular call. Jio can later forward busy or unanswered calls, but it does not offer “unknown numbers only” forwarding.</p></div>
+            </article>
+          </div>
+        </div>
+        <div class="route-compare">
+          <div><span class="compare-icon">◉</span><h3>Caller app call</h3><p>Needs the signed app, push registration, pairing, and a reachable Hermes host. Rings as an app VoIP call with CallKit controls; it uses the existing Caller voice configuration.</p></div>
+          <div><span class="compare-icon">☎</span><h3>Direct number call</h3><p>Needs Vobiz, an enabled outbound relay, an allowlisted destination, and the DebianBat Codex bridge. Rings in the normal phone app.</p></div>
+        </div>
+        <p class="small-print">Hermes has guidance for choosing either integration when instructed. Automatic fallback between the two is not implemented. The new GPT Live + Sol phone bridge does not itself change the app route’s voice provider.</p>
+      </section>
+
+      <section class="section section-alt" id="today">
+        <div class="wrap">
+          <div class="section-head narrow"><p class="eyebrow">02 / Where the work went</p><h2>Caller, Hermes, or the phone network?</h2><p>The biggest additions live in the Hermes integration and the separate Vobiz bridge. The iPhone app already had notification and VoIP call handling.</p></div>
+          <div class="system-grid">
+            <article class="system-card"><span class="system-glyph">▣</span><span class="system-label">iPhone app</span><h3>Caller</h3><p>Already provides push alerts, pairing, and a CallKit voice screen. Local iOS work adds a clearer connecting cue and connection states; it has simulator proof but has not shipped to your phone. iOS still cannot take over Jio calls.</p><span class="system-chip">Existing app · local cue update</span></article>
+            <article class="system-card spotlight"><span class="system-glyph">✳</span><span class="system-label">Personal agent</span><h3>Hermes</h3><p>New PSTN skill places a phone call, waits for status, and can read the inbound inbox or a short on-demand digest. Route guidance helps Hermes select the requested call type. The existing Caller skill still sends app alerts and VoIP invites.</p><span class="system-chip">New skill, install pending</span></article>
+            <article class="system-card"><span class="system-glyph">⌁</span><span class="system-label">Cloud + media</span><h3>Vobiz bridge</h3><p>Separate Worker authenticates callbacks. The DebianBat bridge code streams phone audio into Codex GPT Live, plays an in-call connecting cue during startup, and sends a durable post-call alert through Caller.</p><span class="system-chip">Built, not live</span></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section wrap" id="status">
+        <div class="section-head narrow"><p class="eyebrow">03 / Honest status</p><h2>What you can count on today</h2><p>Code, deployment, and an actual ringing phone are different milestones. This is a build snapshot, not a claim that the new phone route is already answering calls.</p></div>
+        <div class="ledger" role="list">
+          <div class="ledger-row" role="listitem"><div class="ledger-label"><span class="ledger-dot available"></span><strong>Caller app alerts + VoIP UI</strong><small>Existing system</small></div><p>Implemented in the app and relay. A paired signed iPhone and reachable Hermes host are still needed for a specific call.</p><span class="ledger-badge available">Existing</span></div>
+          <div class="ledger-row" role="listitem"><div class="ledger-label"><span class="ledger-dot prepared"></span><strong>Clearer Caller connection cue</strong><small>Local iOS change</small></div><p>The app now has a more distinct connecting sound and Connecting/Connected state in source. Simulator checks passed; this build has not been distributed or checked on your iPhone.</p><span class="ledger-badge prepared">Local only</span></div>
+          <div class="ledger-row" role="listitem"><div class="ledger-label"><span class="ledger-dot prepared"></span><strong>Hermes → direct phone number</strong><small>New PSTN skill + Vobiz relay</small></div><p>Code and tests exist. The deployed outbound relay remains disabled and the media bridge awaits DebianBat installation and live proof.</p><span class="ledger-badge prepared">Prepared</span></div>
+          <div class="ledger-row" role="listitem"><div class="ledger-label"><span class="ledger-dot prepared"></span><strong>Vobiz connection cue + language</strong><small>New media bridge behavior</small></div><p>Bridge code plays a connecting cue after answer while GPT Live starts, then clears it before speech. It prompts the agent to use the caller’s understood language. Neither behavior has been heard in a real carrier call.</p><span class="ledger-badge prepared">Prepared</span></div>
+          <div class="ledger-row" role="listitem"><div class="ledger-label"><span class="ledger-dot prepared"></span><strong>Vobiz DID → AI message taker</strong><small>Signed inbound path + inbox</small></div><p>Inbound code and durable alert outbox are prepared. The DID is unattached; the inbound switch is off; no real inbound call has been tested.</p><span class="ledger-badge prepared">Prepared</span></div>
+          <div class="ledger-row" role="listitem"><div class="ledger-label"><span class="ledger-dot planned"></span><strong>Jio → agent for selected conditions</strong><small>Carrier forwarding</small></div><p>Busy and no-answer forwarding can be configured later after a direct DID test. An “unknown callers only” condition is not provided by Jio.</p><span class="ledger-badge planned">Later</span></div>
+          <div class="ledger-row" role="listitem"><div class="ledger-label"><span class="ledger-dot planned"></span><strong>Automatic default-Hermes follow-up</strong><small>General-profile workflow</small></div><p>Hermes can read the authenticated inbound inbox on request. Automatically waking its default profile with a caller’s report is not wired.</p><span class="ledger-badge planned">Later</span></div>
+        </div>
+      </section>
+
+      <section class="section voice-section" id="voice">
+        <div class="wrap voice-grid">
+          <div><p class="eyebrow">04 / The voice on the call</p><h2>GPT Live speaks.<br /><em>Sol reasons.</em></h2><p>The Vobiz bridge uses ChatGPT/Codex subscription authentication on DebianBat. GPT Live handles speech and delegates substantive requests to a pinned <code>gpt-6-sol</code> text thread. Simple greetings may be spoken directly by GPT Live.</p><p>The inbound agent has a narrow role: identify itself as an AI assistant, ask who called and why, and take a message. It cannot read private Hermes context or obey instructions from an unknown caller.</p></div>
+          <div class="voice-card"><div class="voice-card-head"><span class="pulse-icon"><i></i><i></i><i></i><i></i></span><span>One phone conversation</span></div><div class="voice-step"><span>01</span><div><strong>Call connects</strong><small>Vobiz streams audio to the standalone bridge</small></div></div><div class="voice-step"><span>02</span><div><strong>GPT Live listens and speaks</strong><small>Voice session through Codex App Server</small></div></div><div class="voice-step"><span>03</span><div><strong>Sol handles substance</strong><small>Text handoff for requests needing reasoning</small></div></div><div class="voice-step"><span>04</span><div><strong>Result is stored</strong><small>Bounded report, then a generic Caller alert</small></div></div><p class="voice-card-foot">This exact live phone handoff remains to be verified on DebianBat.</p></div>
+        </div>
+      </section>
+
+      <section class="section wrap" id="setup">
+        <div class="section-head narrow"><p class="eyebrow">05 / Personal setup</p><h2>What installing Caller changes</h2><p>Install the signed iPhone build, allow notifications, and pair the app with Hermes. That gives your agent a private channel to reach this installation.</p></div>
+        <div class="setup-grid">
+          <article><span class="step-number">1</span><h3>Install and register</h3><p>Open Caller on a physical iPhone. Let it register for standard notifications and VoIP pushes; confirm its status says Ready. A signed build and working APNs relay are required.</p></article>
+          <article><span class="step-number">2</span><h3>Pair with Hermes</h3><p>Use the app’s short-lived setup code. Hermes receives a revocable token scoped to this installation; the code and token should stay out of public links and screenshots.</p></article>
+          <article><span class="step-number">3</span><h3>Choose what should ring</h3><p>Ask for a Caller app call when you want a VoIP/CallKit conversation. Ask for your phone number when you want a standard cellular ring, after Vobiz activation. The app is optional for that direct PSTN route.</p></article>
+          <article><span class="step-number">4</span><h3>Read inbound results</h3><p>After the DID path is enabled and an inbound call ends, a paired Caller app can receive a generic alert. Ask Hermes for the inbound call result or digest; the detailed report is not placed in the push notification.</p></article>
+        </div>
+        <div class="install-note"><span aria-hidden="true">↗</span><div><strong>An iPhone install does not take over your mobile line.</strong><p>Caller’s CallKit screen handles Caller VoIP sessions. Your Jio cellular calls stay with Jio unless you later enable carrier forwarding to the Vobiz number.</p></div></div>
+      </section>
+
+      <section class="section section-alt" id="boundaries">
+        <div class="wrap boundaries-grid">
+          <div><p class="eyebrow">06 / Important boundaries</p><h2>What the phone can—and cannot—do</h2></div>
+          <div class="faq-list">
+            <details open><summary>Can I send only unknown Jio callers to the agent?</summary><p>Not with <a href="https://www.jio.com/help/faq/mobile/services/hd-voice/what-are-different-types-of-call-forwarding/" target="_blank" rel="noopener noreferrer">Jio’s documented forwarding controls</a>. Jio offers busy, no-answer, not-reachable, and unconditional forwarding. Busy or no-answer would apply to every caller who meets that condition. The iPhone’s unknown-caller controls can screen or silence a call, but do not transfer its audio to Caller.</p></details>
+            <details><summary>Will the caller hear a natural ringing tone?</summary><p>Before answer, ringback is controlled by the phone network. After the authenticated Vobiz audio stream opens, the bridge now plays a more recognizable in-call connecting cadence through GPT Live startup and clears it before speech. This is <strong>post-answer audio</strong>, not carrier ringback. Its real loudness and timing still need a live call test.</p></details>
+            <details><summary>Can GPT Live start before the phone is answered?</summary><p>Not through the current Vobiz integration. Its documented <a href="https://www.vobiz.ai/docs/concepts/callbacks" target="_blank" rel="noopener noreferrer">StartApp callback occurs at answer</a>; the bridge starts that call’s GPT Live session after the authenticated media stream begins. The service can check Codex readiness beforehand, but that is not the caller’s live session.</p></details>
+            <details><summary>Will it speak any language the caller uses?</summary><p>The inbound prompt now asks GPT Live to follow the caller’s understood language or ask for clarification. The first fixed greeting remains in English. Real multilingual carrier audio has not been tested, so there is no verified guarantee for every language or dialect.</p></details>
+            <details><summary>Can a stranger make Hermes do work through a call?</summary><p>No. The incoming assistant is restricted to taking a message. It has no private Hermes context or general tools. The owner can later ask Hermes to read a bounded, redacted call report.</p></details>
+          </div>
+        </div>
+      </section>
+
+      <section class="section wrap next-section" id="next">
+        <div><p class="eyebrow">07 / Next live milestone</p><h2>From prepared code to a real call</h2><p>When DebianBat is available, install the standalone bridge and Hermes skill, apply the inbound database migrations, and verify the service’s Codex readiness. Then test signed callbacks with the DID while inbound answering stays disabled. Only after that should the DID answer a controlled test call. Jio forwarding comes last.</p><a class="button secondary" href="https://github.com/Schreezer/AgentCall/blob/main/VOBIZ_INBOUND_JIO.md" target="_blank" rel="noopener noreferrer">Read the rollout checklist <span aria-hidden="true">↗</span></a></div>
+        <div class="next-card"><span>Activation order</span><ol><li><strong>DebianBat</strong><small>Bridge + Codex ready</small></li><li><strong>Worker</strong><small>Signed callbacks proven</small></li><li><strong>Direct DID</strong><small>Two-way audio + Caller alert</small></li><li><strong>Jio</strong><small>Busy/no-answer only, if desired</small></li></ol></div>
+      </section>
+
+      <section class="sources wrap" aria-labelledby="sources-heading"><h2 id="sources-heading">Source and privacy</h2><div><p>This page reflects the code and rollout status checked on 29 September 2026 at 18:39 IST. See the <a href="https://github.com/Schreezer/AgentCall/tree/main/integrations/hermes/pstn-caller" target="_blank" rel="noopener noreferrer">Hermes PSTN skill</a>, <a href="https://github.com/Schreezer/AgentCall/tree/main/vobiz-outbound" target="_blank" rel="noopener noreferrer">Vobiz Worker</a>, <a href="https://github.com/Schreezer/AgentCall/blob/main/integrations/hermes/urgent-caller/VOBIZ_CODEX_BRIDGE.md" target="_blank" rel="noopener noreferrer">Codex bridge design</a>, and <a href="https://github.com/Schreezer/AgentCall/blob/main/VOBIZ_INBOUND_JIO.md" target="_blank" rel="noopener noreferrer">rollout plan</a>.</p><p>Incoming caller ID is unverified. The planned system stores bounded, code-redacted call reports and metadata in D1; it does not save phone audio. The iPhone alert is generic and excludes the caller number and report. Automatic retention/deletion is not yet configured.</p></div></section>
+    </main>
+    <footer class="site-footer"><div class="wrap footer-inner"><span class="brand"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>Caller<span class="brand-cross">×</span>Hermes</span><p>A personal capability map. Not a live connection status.</p><a href="#top">Back to top ↑</a></div></footer>
+  </body>
+</html>
