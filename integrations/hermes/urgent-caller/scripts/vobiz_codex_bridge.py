@@ -14,6 +14,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import ipaddress
 import json
 import math
 import os
@@ -111,6 +112,36 @@ INBOUND_BACKING_AGENT_POLICY = (
     "information."
 )
 INBOUND_NOTIFICATION = "Hermes answered an incoming call. Ask Hermes for the call result."
+NOTIFICATION_POLL_SECONDS = 30
+
+
+def validated_http_origin(value: str, name: str) -> str:
+    """Accept an exact HTTPS origin, or an HTTP origin on a loopback IP."""
+    if not isinstance(value, str) or value != value.strip() or re.search(r"[\x00-\x20\x7f]", value):
+        raise ValueError(f"{name} must be an exact HTTPS or loopback origin")
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        hostname = parsed.hostname
+        # Accessing port also validates a malformed or out-of-range value.
+        _ = parsed.port
+    except (ValueError, TypeError) as error:
+        raise ValueError(f"{name} must be an exact HTTPS or loopback origin") from error
+    if (
+        not hostname or parsed.username is not None or parsed.password is not None
+        or parsed.path not in {"", "/"} or parsed.query or parsed.fragment
+    ):
+        raise ValueError(f"{name} must be an exact HTTPS or loopback origin")
+    if parsed.scheme == "https":
+        pass
+    elif parsed.scheme == "http":
+        try:
+            if not ipaddress.ip_address(hostname).is_loopback:
+                raise ValueError
+        except ValueError as error:
+            raise ValueError(f"{name} must be an exact HTTPS or loopback origin") from error
+    else:
+        raise ValueError(f"{name} must be an exact HTTPS or loopback origin")
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
 
 
 def verified_sol_thread_id(started: dict) -> str:
@@ -583,29 +614,27 @@ class VobizCodexBridge:
     def __init__(self, *, relay_url: str, agent_token: str, stream_secret: str,
                  codex_command: str, l16_endian: str = "big", allow_inbound: bool = False,
                  caller_relay_url: str = "", caller_agent_token: str = ""):
-        if not relay_url.startswith("https://") and not relay_url.startswith("http://127.0.0.1:"):
-            raise ValueError("CALLER_RELAY_URL must be HTTPS or loopback")
+        relay_url = validated_http_origin(relay_url, "VOBIZ_RELAY_URL")
         if len(agent_token) < 32 or len(stream_secret) < 32:
             raise ValueError("bridge credentials must be at least 32 characters")
         if l16_endian not in {"little", "big"}:
             raise ValueError("CALLER_VOBIZ_L16_ENDIAN must be little or big")
         if bool(caller_relay_url) != bool(caller_agent_token):
             raise ValueError("Caller notification URL and token must be configured together")
-        if caller_relay_url and not (
-            caller_relay_url.startswith("https://") or caller_relay_url.startswith("http://127.0.0.1:")
-        ):
-            raise ValueError("CALLER_RELAY_URL must be HTTPS or loopback")
-        self.relay_url = relay_url.rstrip("/")
+        if caller_relay_url:
+            caller_relay_url = validated_http_origin(caller_relay_url, "CALLER_RELAY_URL")
+        self.relay_url = relay_url
         self.agent_token = agent_token
         self.stream_secret = stream_secret
         self.codex_command = codex_command
         self.l16_endian = l16_endian
         self.allow_inbound = allow_inbound
-        self.caller_relay_url = caller_relay_url.rstrip("/")
+        self.caller_relay_url = caller_relay_url
         self.caller_agent_token = caller_agent_token
         self.credentials = HermesCodexCredentials()
         self.app: AppServer | None = None
         self.app_lock = asyncio.Lock()
+        self.notification_lock = asyncio.Lock()
         self.webrtc_verified = False
         self.used_tokens: dict[str, int] = {}
         self.active_calls: set[str] = set()
@@ -741,27 +770,62 @@ class VobizCodexBridge:
                 await asyncio.sleep(0.25 * 3**attempt)
         return False
 
-    async def notify_owner(self, call_id: str) -> bool:
-        """Optional low-detail Caller alert; relay idempotency prevents duplicates."""
+    async def drain_notifications(self, max_items: int = 10) -> int:
+        """Deliver due Worker outbox items and acknowledge only after relay acceptance."""
         if not self.caller_relay_url:
-            return False
-        for attempt in range(3):
-            try:
-                status, _ = await http_json(
-                    f"{self.caller_relay_url}/v1/calls", method="POST",
-                    token=self.caller_agent_token,
-                    body={"caller_name": "Hermes", "message": INBOUND_NOTIFICATION},
-                    timeout=8, idempotency_key=f"vobiz-inbound-{call_id}",
-                )
-                if status not in {200, 202}:
-                    raise RuntimeError("caller_notification_rejected")
-                return True
-            except Exception as error:
-                if attempt == 2:
-                    print(f"[caller vobiz] owner notification failed: {type(error).__name__}", file=sys.stderr)
-                    return False
-                await asyncio.sleep(0.25 * 3**attempt)
-        return False
+            return 0
+        delivered = 0
+        async with self.notification_lock:
+            for _ in range(max_items):
+                try:
+                    status, response = await http_json(
+                        f"{self.relay_url}/v1/vobiz/bridge/notifications/claim",
+                        method="POST", token=self.agent_token, body={}, timeout=8,
+                    )
+                    if status != 200 or not isinstance(response, dict):
+                        raise RuntimeError("notification_claim_rejected")
+                    item = response.get("notification")
+                    if item is None:
+                        break
+                    if not isinstance(item, dict):
+                        raise RuntimeError("notification_claim_invalid")
+                    call_id = item.get("call_id")
+                    idempotency_key = item.get("idempotency_key")
+                    if (
+                        not isinstance(call_id, str) or not CALL_ID.fullmatch(call_id)
+                        or idempotency_key != f"vobiz-inbound-{call_id}"
+                        or item.get("caller_name") != "Hermes"
+                        or item.get("message") != INBOUND_NOTIFICATION
+                    ):
+                        raise RuntimeError("notification_claim_invalid")
+                    relay_status, _ = await http_json(
+                        f"{self.caller_relay_url}/v1/calls", method="POST",
+                        token=self.caller_agent_token,
+                        body={"caller_name": "Hermes", "message": INBOUND_NOTIFICATION},
+                        timeout=8, idempotency_key=idempotency_key,
+                    )
+                    if relay_status not in {200, 202}:
+                        raise RuntimeError("caller_notification_rejected")
+                    ack_status, _ = await http_json(
+                        f"{self.relay_url}/v1/vobiz/bridge/notifications/"
+                        f"{urllib.parse.quote(call_id)}/ack",
+                        method="POST", token=self.agent_token, body={}, timeout=8,
+                    )
+                    if ack_status != 200:
+                        raise RuntimeError("notification_ack_rejected")
+                    delivered += 1
+                except Exception as error:
+                    print(
+                        f"[caller vobiz] owner notification pending: {type(error).__name__}",
+                        file=sys.stderr,
+                    )
+                    break
+        return delivered
+
+    async def notification_loop(self) -> None:
+        while True:
+            await self.drain_notifications()
+            await asyncio.sleep(NOTIFICATION_POLL_SECONDS)
 
     async def finish_call(self, call_id: str, direction: str, transcript: list[dict]) -> None:
         event = {"transcript": transcript[:20]}
@@ -769,7 +833,7 @@ class VobizCodexBridge:
             event["inbound_report"] = bounded_inbound_report(transcript)
         reported = await self.report(call_id, "ended", **event)
         if reported and direction == "inbound":
-            await self.notify_owner(call_id)
+            await self.drain_notifications()
 
     async def process_request(self, connection, request):
         path = urllib.parse.urlsplit(request.path)
@@ -972,6 +1036,9 @@ async def serve(bridge: VobizCodexBridge, host: str, port: int):
     from websockets.asyncio.server import serve as websocket_serve
 
     await bridge.ensure_codex()
+    notification_task = None
+    if bridge.caller_relay_url:
+        notification_task = asyncio.create_task(bridge.notification_loop())
     try:
         async with websocket_serve(
             bridge.handle, host, port, process_request=bridge.process_request,
@@ -980,6 +1047,9 @@ async def serve(bridge: VobizCodexBridge, host: str, port: int):
             print(f"Caller Vobiz Codex bridge listening on {host}:{port}")
             await asyncio.Future()
     finally:
+        if notification_task:
+            notification_task.cancel()
+            await asyncio.gather(notification_task, return_exceptions=True)
         if bridge.app:
             await bridge.app.close()
 

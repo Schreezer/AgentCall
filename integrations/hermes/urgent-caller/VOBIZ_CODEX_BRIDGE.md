@@ -41,7 +41,7 @@ Required service environment:
 | `VOBIZ_CODEX_ENTRY_REL` | CLI entry path relative to that package root, such as `bin/codex.js` |
 | `VOBIZ_NODE_BINARY` | Absolute path to the Node.js executable used by the CLI |
 | `VOBIZ_BRIDGE_ALLOW_INBOUND` | Explicit inbound opt-in; defaults to `false` |
-| `CALLER_RELAY_URL`, `CALLER_AGENT_TOKEN` | Optional paired Caller relay and agent token for a low-detail iPhone alert after a completed inbound call; set both or neither |
+| `CALLER_RELAY_URL`, `CALLER_AGENT_TOKEN` | Optional paired Caller relay origin and agent token for a low-detail iPhone alert after a completed inbound call; set both or neither |
 
 Resolve the DebianBat paths from `readlink -f` on the installed Codex and Node
 executables, then point `VOBIZ_CODEX_PACKAGE_ROOT` at the narrow CLI package
@@ -72,6 +72,20 @@ order; confirm intelligible input and output in the authorized self-call. Set
 `little` only if that call or Vobiz support confirms it. The service process
 must use Hermes's Python environment or otherwise be able to import
 `agent.credential_pool`.
+
+Both relay URL settings must be exact origins. HTTPS is required off-machine;
+plain HTTP is accepted only for numeric loopback addresses. Credentials, paths,
+queries, and fragments are rejected before the bridge starts.
+
+For inbound calls, the Vobiz Worker owns the durable notification outbox. Once
+the ended event is stored, the bridge claims due alerts at startup, every 30
+seconds, and immediately after a completed inbound call. It sends only the fixed
+generic message to Caller, with `vobiz-inbound-{call-id}` as the Caller relay
+idempotency key, then acknowledges the Worker item. A process or network failure
+leaves the item pending for a later retry. Caller credentials are optional; when
+they are absent, the bridge does not claim anything and pending items stay in D1.
+Worker `owner_notification_status=sent` means Caller accepted or queued the alert;
+it does not prove APNs delivery or that the iPhone displayed it.
 
 Run the isolated service with:
 
@@ -186,11 +200,13 @@ the speaker as Chirag's AI assistant and offers to take a message. Caller ID
 is unverified; the assistant must not claim Chirag is busy or available, promise
 a callback, disclose private information, or take actions requested by callers.
 
-If the optional Caller relay URL and token are present, a successfully
-reported inbound call queues one idempotent `message` mode alert through the
-paired Caller app. Its text only says Hermes answered an incoming call; it
-contains no caller number or transcript, so lock-screen previews remain low
-detail. Relay acceptance does not prove the iPhone displayed the alert.
+If the optional Caller relay URL and token are present, a completed inbound
+call queues one durable outbox item. The bridge delivers one idempotent
+`message` mode alert through the paired Caller app and acknowledges the item
+only after Caller accepts it. Its text only says Hermes answered an incoming
+call; it contains no caller number or transcript, so lock-screen previews
+remain low detail. Relay acceptance does not prove the iPhone displayed the
+alert.
 
 ### Model verification
 

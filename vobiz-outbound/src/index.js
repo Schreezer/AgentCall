@@ -2,6 +2,8 @@ const E164_INDIA = /^\+91[1-9]\d{9}$/;
 const CALLBACK_BYTES = 16_384;
 const MAX_CALL_MS = 3 * 60_000;
 const MAX_OPENING_SPEECH_CHARS = 320;
+const NOTIFICATION_CLAIM_DELAY_MS = 30_000;
+const NOTIFICATION_MESSAGE = "Hermes answered an incoming call. Ask Hermes for the call result.";
 const OUTBOUND_OPENING = "Hello, I'm Chirag's AI assistant, calling on his behalf. Is this a good time?";
 const INBOUND_OPENING = "Hello, I'm Chirag's AI assistant. May I take a message for him?";
 const INBOUND_INSTRUCTIONS = "Answer as Chirag's AI assistant, identify yourself as AI, and take a message for Chirag. Do not claim to be Chirag, verify a caller's identity from caller ID, or disclose private information.";
@@ -132,6 +134,7 @@ function publicInboundCall(row, detail = false) {
     ...publicCall(row),
     caller_number: row.from_number,
     called_number: row.to_number,
+    owner_notification_status: row.owner_notification_status || null,
     ...(detail ? { inbound_report: row.inbound_report, source_type: "unknown" } : {}),
   };
 }
@@ -338,7 +341,11 @@ export async function getPstnCall(env, callID) {
 
 export async function listInboundCalls(env) {
   const result = await env.DB.prepare(
-    "SELECT * FROM vobiz_inbound_calls ORDER BY created_at DESC LIMIT 20",
+    `SELECT calls.*, notifications.status AS owner_notification_status
+       FROM vobiz_inbound_calls AS calls
+       LEFT JOIN vobiz_caller_notification_outbox AS notifications
+         ON notifications.call_id = calls.id
+      ORDER BY calls.created_at DESC LIMIT 20`,
   ).all();
   return json(200, { calls: result.results.map((row) => publicInboundCall(row)) });
 }
@@ -346,7 +353,11 @@ export async function listInboundCalls(env) {
 export async function getInboundCall(env, callID) {
   if (!isUUID(callID)) return json(404, { error: "call_not_found" });
   const row = await env.DB.prepare(
-    "SELECT * FROM vobiz_inbound_calls WHERE id = ?1",
+    `SELECT calls.*, notifications.status AS owner_notification_status
+       FROM vobiz_inbound_calls AS calls
+       LEFT JOIN vobiz_caller_notification_outbox AS notifications
+         ON notifications.call_id = calls.id
+      WHERE calls.id = ?1`,
   ).bind(callID.toLowerCase()).first();
   return row ? json(200, publicInboundCall(row, true)) : json(404, { error: "call_not_found" });
 }
@@ -735,7 +746,7 @@ export async function bridgeCallEvent(request, env, callID) {
     const reportText = body.event === "ended" && typeof body.inbound_report === "string"
       ? cleanSummary(body.inbound_report) : null;
     const report = reportText?.slice(0, 500) || null;
-    await env.DB.prepare(
+    const update = env.DB.prepare(
       `UPDATE vobiz_inbound_calls
           SET status = CASE
                 WHEN bridge_terminal_event = 'failed' OR (?2 = 'failed' AND bridge_terminal_event = 'ended')
@@ -752,7 +763,20 @@ export async function bridgeCallEvent(request, env, callID) {
               ended_at = CASE WHEN ?2 IN ('completed', 'failed')
                 THEN COALESCE(ended_at, ?6) ELSE ended_at END
         WHERE id = ?1`,
-    ).bind(row.id, status, body.event, summary, report, now).run();
+    ).bind(row.id, status, body.event, summary, report, now);
+    if (body.event === "ended") {
+      const queue = env.DB.prepare(
+        `INSERT INTO vobiz_caller_notification_outbox
+           (call_id, status, attempt_count, next_attempt_at, created_at, updated_at)
+         SELECT id, 'pending', 0, ?2, ?2, ?2
+           FROM vobiz_inbound_calls
+          WHERE id = ?1 AND status = 'completed' AND bridge_terminal_event = 'ended'
+         ON CONFLICT(call_id) DO NOTHING`,
+      ).bind(row.id, now);
+      await env.DB.batch([update, queue]);
+    } else {
+      await update.run();
+    }
     return json(200, { ok: true });
   }
   await env.DB.prepare(
@@ -764,6 +788,47 @@ export async function bridgeCallEvent(request, env, callID) {
       WHERE id = ?1`,
   ).bind(row.id, status, summary, now).run();
   return json(200, { ok: true });
+}
+
+export async function claimCallerNotification(env) {
+  const now = Date.now();
+  const row = await env.DB.prepare(
+    `UPDATE vobiz_caller_notification_outbox
+        SET attempt_count = attempt_count + 1,
+            next_attempt_at = ?1 + ?2,
+            updated_at = ?1
+      WHERE call_id = (
+        SELECT call_id FROM vobiz_caller_notification_outbox
+         WHERE status = 'pending' AND next_attempt_at <= ?1
+         ORDER BY created_at ASC LIMIT 1
+      ) AND status = 'pending' AND next_attempt_at <= ?1
+      RETURNING call_id, attempt_count`,
+  ).bind(now, NOTIFICATION_CLAIM_DELAY_MS).first();
+  if (!row) return json(200, { notification: null });
+  return json(200, { notification: {
+    call_id: row.call_id,
+    idempotency_key: `vobiz-inbound-${row.call_id}`,
+    caller_name: "Hermes",
+    message: NOTIFICATION_MESSAGE,
+    attempt: row.attempt_count,
+  } });
+}
+
+export async function acknowledgeCallerNotification(env, callID) {
+  if (!isUUID(callID)) return json(404, { error: "notification_not_found" });
+  const now = Date.now();
+  const changed = await env.DB.prepare(
+    `UPDATE vobiz_caller_notification_outbox
+        SET status = 'sent', sent_at = COALESCE(sent_at, ?2), updated_at = ?2
+      WHERE call_id = ?1 AND status = 'pending'`,
+  ).bind(callID.toLowerCase(), now).run();
+  if (changed.meta.changes) return json(200, { ok: true });
+  const prior = await env.DB.prepare(
+    "SELECT status FROM vobiz_caller_notification_outbox WHERE call_id = ?1",
+  ).bind(callID.toLowerCase()).first();
+  return prior?.status === "sent"
+    ? json(200, { ok: true })
+    : json(404, { error: "notification_not_found" });
 }
 
 async function allowOutbound(env) {
@@ -796,6 +861,7 @@ const worker = {
       if (request.method === "GET" && url.pathname === "/health") {
         await env.DB.prepare("SELECT id FROM vobiz_pstn_calls LIMIT 1").first();
         await env.DB.prepare("SELECT id FROM vobiz_inbound_calls LIMIT 1").first();
+        await env.DB.prepare("SELECT call_id FROM vobiz_caller_notification_outbox LIMIT 1").first();
         return json(200, { ok: true, service: "caller-vobiz-outbound", storage_ready: true });
       }
 
@@ -840,6 +906,21 @@ const worker = {
         if (request.method === "GET") return await getBridgeCall(env, bridge[1]);
         if (bridge[2] === "claim") return await claimBridgeCall(env, bridge[1]);
         return await bridgeCallEvent(request, env, bridge[1]);
+      }
+      if (url.pathname === "/v1/vobiz/bridge/notifications/claim" && request.method === "POST") {
+        if (!(await validBearer(request, env.VOBIZ_BRIDGE_RELAY_TOKEN))) {
+          return json(401, { error: "invalid_bridge_credential" });
+        }
+        return await claimCallerNotification(env);
+      }
+      const notificationAck = url.pathname.match(
+        /^\/v1\/vobiz\/bridge\/notifications\/([0-9a-f-]+)\/ack$/i,
+      );
+      if (notificationAck && request.method === "POST") {
+        if (!(await validBearer(request, env.VOBIZ_BRIDGE_RELAY_TOKEN))) {
+          return json(401, { error: "invalid_bridge_credential" });
+        }
+        return await acknowledgeCallerNotification(env, notificationAck[1]);
       }
       return json(404, { error: "not_found" });
     } catch (error) {

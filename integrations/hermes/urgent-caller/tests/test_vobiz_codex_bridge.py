@@ -349,6 +349,28 @@ class VobizBridgeTests(unittest.TestCase):
         import asyncio
         asyncio.run(check())
 
+    def test_relay_urls_are_exact_https_or_loopback_origins(self):
+        self.assertEqual(
+            bridge.validated_http_origin("https://relay.example/", "VOBIZ_RELAY_URL"),
+            "https://relay.example",
+        )
+        self.assertEqual(
+            bridge.validated_http_origin("http://127.0.0.1:8787", "VOBIZ_RELAY_URL"),
+            "http://127.0.0.1:8787",
+        )
+        self.assertEqual(
+            bridge.validated_http_origin("http://[::1]:8787", "VOBIZ_RELAY_URL"),
+            "http://[::1]:8787",
+        )
+        for value in (
+            "http://relay.example", "http://localhost:8787", "https://user@relay.example",
+            "https://relay.example/path", "https://relay.example?token=x",
+            "https://relay.example#fragment", "https://relay.example:99999",
+            " https://relay.example", "https://relay.example\n",
+        ):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "exact HTTPS"):
+                bridge.validated_http_origin(value, "VOBIZ_RELAY_URL")
+
     def test_completed_inbound_reports_message_then_sends_private_idempotent_alert(self):
         async def check():
             from unittest import mock
@@ -360,39 +382,77 @@ class VobizBridgeTests(unittest.TestCase):
             )
             transcript = [{"role": "user", "text": "My code is 12-34-56; please call 9000000001."}]
             with mock.patch.object(service, "report", new=mock.AsyncMock(return_value=True)) as report, \
-                    mock.patch.object(service, "notify_owner", new=mock.AsyncMock(return_value=True)) as notify:
+                    mock.patch.object(service, "drain_notifications", new=mock.AsyncMock(return_value=1)) as drain:
                 await service.finish_call("call-test", "inbound", transcript)
             report.assert_awaited_once()
             event = report.await_args.kwargs
             self.assertNotIn("12-34-56", event["inbound_report"])
             self.assertLessEqual(len(event["inbound_report"]), 500)
-            notify.assert_awaited_once_with("call-test")
+            drain.assert_awaited_once_with()
 
             with mock.patch.object(service, "report", new=mock.AsyncMock(return_value=False)), \
-                    mock.patch.object(service, "notify_owner", new=mock.AsyncMock()) as notify:
+                    mock.patch.object(service, "drain_notifications", new=mock.AsyncMock()) as drain:
                 await service.finish_call("call-test", "inbound", transcript)
-            notify.assert_not_awaited()
+            drain.assert_not_awaited()
 
             with mock.patch.object(service, "report", new=mock.AsyncMock(return_value=True)), \
-                    mock.patch.object(service, "notify_owner", new=mock.AsyncMock()) as notify:
+                    mock.patch.object(service, "drain_notifications", new=mock.AsyncMock()) as drain:
                 await service.finish_call("call-test", "outbound", transcript)
-            notify.assert_not_awaited()
+            drain.assert_not_awaited()
 
-            replies = mock.AsyncMock(side_effect=[(503, {}), (202, {"id": "alert"})])
-            with mock.patch.object(bridge, "http_json", replies), \
-                    mock.patch.object(bridge.asyncio, "sleep", new=mock.AsyncMock()):
-                self.assertTrue(await service.notify_owner("call-test"))
-            self.assertEqual(replies.await_count, 2)
-            bodies = [call.kwargs["body"] for call in replies.await_args_list]
-            self.assertEqual(bodies[0], bodies[1])
-            self.assertEqual(bodies[0], {
+            notification = {"notification": {
+                "call_id": "call-test", "idempotency_key": "vobiz-inbound-call-test",
+                "caller_name": "Hermes", "message": bridge.INBOUND_NOTIFICATION, "attempt": 1,
+            }}
+            failed = mock.AsyncMock(side_effect=[(200, notification), (503, {})])
+            with mock.patch.object(bridge, "http_json", failed):
+                self.assertEqual(await service.drain_notifications(), 0)
+            self.assertEqual(failed.await_count, 2)
+            self.assertEqual(failed.await_args_list[1].kwargs["body"], {
                 "caller_name": "Hermes", "message": bridge.INBOUND_NOTIFICATION,
             })
+
+            timed_out = mock.AsyncMock(side_effect=[
+                (200, {"notification": {**notification["notification"], "attempt": 2}}),
+                TimeoutError("relay timed out"),
+            ])
+            with mock.patch.object(bridge, "http_json", timed_out):
+                self.assertEqual(await service.drain_notifications(), 0)
             self.assertEqual(
-                replies.await_args_list[0].kwargs["idempotency_key"],
-                replies.await_args_list[1].kwargs["idempotency_key"],
+                timed_out.await_args_list[1].kwargs["idempotency_key"],
+                failed.await_args_list[1].kwargs["idempotency_key"],
             )
-            self.assertNotIn("12-34-56", json.dumps(bodies))
+
+            # A later process start can claim the same pending item. The stable key
+            # lets the paired Caller relay deduplicate a send that happened before a crash.
+            retried = mock.AsyncMock(side_effect=[
+                (200, {"notification": {**notification["notification"], "attempt": 3}}),
+                (202, {"id": "alert"}), (200, {"ok": True}),
+                (200, {"notification": None}),
+            ])
+            with mock.patch.object(bridge, "http_json", retried):
+                self.assertEqual(await service.drain_notifications(), 1)
+            self.assertEqual(retried.await_count, 4)
+            self.assertEqual(
+                retried.await_args_list[1].kwargs["idempotency_key"],
+                "vobiz-inbound-call-test",
+            )
+            self.assertNotIn("12-34-56", json.dumps(retried.await_args_list[1].kwargs["body"]))
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_missing_caller_credentials_leave_notification_unclaimed(self):
+        async def check():
+            from unittest import mock
+
+            service = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", allow_inbound=True,
+            )
+            with mock.patch.object(bridge, "http_json", new=mock.AsyncMock()) as request:
+                self.assertEqual(await service.drain_notifications(), 0)
+            request.assert_not_awaited()
 
         import asyncio
         asyncio.run(check())
@@ -462,7 +522,7 @@ class VobizBridgeTests(unittest.TestCase):
                     mock.patch.object(service, "ensure_codex", new=mock.AsyncMock(return_value=object())), \
                     mock.patch.object(service, "_receive_media", new=receive_media), \
                     mock.patch.object(service, "report", new=report), \
-                    mock.patch.object(service, "notify_owner", new=mock.AsyncMock()) as notify, \
+                    mock.patch.object(service, "drain_notifications", new=mock.AsyncMock()) as drain, \
                     mock.patch.object(bridge, "VobizInputTrack", return_value=object()), \
                     mock.patch.object(bridge, "CodexPSTNSession", Session):
                 await asyncio.wait_for(service.handle(Socket()), timeout=2)
@@ -471,7 +531,7 @@ class VobizBridgeTests(unittest.TestCase):
             self.assertEqual(session_contexts[0]["opening_speech"], bridge.INBOUND_OPENING)
             self.assertIsNone(session_contexts[0]["caller_number"])
             self.assertIn("Tell Chirag I called", events[1][1]["inbound_report"])
-            notify.assert_awaited_once_with("call-test")
+            drain.assert_awaited_once_with()
             self.assertFalse(service.active_calls)
 
         import asyncio

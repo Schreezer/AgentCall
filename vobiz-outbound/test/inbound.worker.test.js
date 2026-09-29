@@ -50,6 +50,7 @@ describe("signed Vobiz inbound relay", () => {
   beforeEach(async () => {
     await env.DB.prepare("DELETE FROM vobiz_callback_nonces").run();
     await env.DB.prepare("DELETE FROM vobiz_inbound_callback_nonces").run();
+    await env.DB.prepare("DELETE FROM vobiz_caller_notification_outbox").run();
     await env.DB.prepare("DELETE FROM vobiz_inbound_calls").run();
     await env.DB.prepare("DELETE FROM vobiz_pstn_calls").run();
   });
