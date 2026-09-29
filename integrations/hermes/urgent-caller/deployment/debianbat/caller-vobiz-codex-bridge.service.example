@@ -1,5 +1,5 @@
 [Unit]
-Description=Caller outbound Vobiz to Codex WebRTC bridge
+Description=Caller Vobiz to Codex WebRTC bridge
 Wants=network-online.target
 After=network-online.target
 

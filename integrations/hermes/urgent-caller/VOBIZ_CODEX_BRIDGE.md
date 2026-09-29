@@ -1,7 +1,7 @@
 # Vobiz to Codex media bridge
 
-The bridge is a separate Python service for the personal outbound-call pilot. It
-accepts a Vobiz bidirectional WebSocket stream after the called person answers,
+The bridge is a separate Python service for the personal Vobiz calling pilot. It
+accepts a Vobiz bidirectional WebSocket stream after a call connects,
 joins a Codex App Server realtime session as a WebRTC audio peer, and relays audio
 in both directions. It uses the existing Hermes `openai-codex` credential pool
 and ChatGPT authentication. It pins `gpt-6-sol` as the Codex text reasoning
@@ -11,10 +11,13 @@ acknowledgement itself; its call prompt tells it to delegate substantive
 recipient requests to the Sol thread and speak the result. There is no OpenAI
 API key or fallback provider.
 
-The bridge does **not** install or restart Hermes's gateway. Inbound calls and
-Jio forwarding are disabled in this pilot. The bridge admits one call at a time.
+The bridge does **not** install or restart Hermes's gateway. Inbound calls are
+implemented behind `VOBIZ_BRIDGE_ALLOW_INBOUND=false`; the isolated Worker has
+its own disabled inbound switch. The purchased DID remains unattached and Jio
+forwarding remains unconfigured until live readiness is verified. The bridge
+admits one call at a time.
 It holds audio only in short memory buffers; it does not save audio. It sends a
-bounded, OTP-redacted transcript to the isolated outbound Worker at call end.
+bounded, numeric-code-redacted transcript to the isolated Worker at call end.
 
 ## Runtime
 
@@ -37,6 +40,8 @@ Required service environment:
 | `VOBIZ_CODEX_PACKAGE_ROOT` | Exact directory containing the Codex CLI entry and its runtime assets |
 | `VOBIZ_CODEX_ENTRY_REL` | CLI entry path relative to that package root, such as `bin/codex.js` |
 | `VOBIZ_NODE_BINARY` | Absolute path to the Node.js executable used by the CLI |
+| `VOBIZ_BRIDGE_ALLOW_INBOUND` | Explicit inbound opt-in; defaults to `false` |
+| `CALLER_RELAY_URL`, `CALLER_AGENT_TOKEN` | Optional paired Caller relay and agent token for a low-detail iPhone alert after a completed inbound call; set both or neither |
 
 Resolve the DebianBat paths from `readlink -f` on the installed Codex and Node
 executables, then point `VOBIZ_CODEX_PACKAGE_ROOT` at the narrow CLI package
@@ -149,20 +154,43 @@ The isolated Worker gives Vobiz an Answer URL that returns `<Stream
 bidirectional="true" keepCallAlive="true"
 contentType="audio/x-l16;rate=16000">` pointing at the public WSS URL with a
 short-lived signed `token` query parameter. The token is
-`base64url(JSON({v:1,id,exp,direction:'outbound'})).base64url(HMAC-SHA256(secret,
-first_segment))`. The bridge checks it, then fetches
+`base64url(JSON({v:1,id,exp,direction})).base64url(HMAC-SHA256(secret,
+first_segment))`, where `direction` is `outbound` or `inbound`. The bridge checks
+it, then fetches
 `GET /v1/vobiz/bridge/calls/{id}` using `VOBIZ_RELAY_TOKEN`. The context must
 include `id`, `direction`, `vobiz_call_id`, `instructions`, and
-`opening_speech`. The bridge compares the expected `vobiz_call_id` with
+`opening_speech`; inbound context must also include the owned E.164
+`called_number` and may include an unverified E.164 `caller_number`. The bridge
+compares the expected `vobiz_call_id` with
 Vobiz's `start.callId` and atomically claims the call at
 `POST /v1/vobiz/bridge/calls/{id}/claim` before starting Codex. This Worker
 claim blocks token replay after a bridge restart.
 
+First test the DID binding with the Worker inbound flag off: valid signed
+callbacks are recorded as `blocked_disabled`, while Answer returns `<Hangup/>`.
+After confirming Vobiz signs both callbacks and the public WSS path is healthy,
+enable the bridge inbound flag and then the Worker's inbound flag for a
+controlled conversation test. Vobiz number binding changes where incoming
+calls route immediately. A forwarded
+Jio call cannot be distinguished from a direct DID call using caller ID alone,
+so both use the same message-taking policy.
+
 The bridge reports `connected`, `ended`, or `failed` to
 `POST /v1/vobiz/bridge/calls/{id}/events`. `ended` includes up to 20 transcript
-turns (400 characters each); the Worker creates the owner-facing summary.
-Unknown callers get no Hermes tools or private context. In the current pilot,
-inbound tokens are rejected before a Codex session starts.
+turns (400 characters each). For inbound calls it also includes a maximum
+500-character `inbound_report` made from the caller's own words, with long
+numeric strings redacted. This is evidence of what was heard, not a claim that
+the message was delivered or acknowledged. Unknown callers get no Hermes
+tools or private context. Inbound callers hear a fixed greeting that identifies
+the speaker as Chirag's AI assistant and offers to take a message. Caller ID
+is unverified; the assistant must not claim Chirag is busy or available, promise
+a callback, disclose private information, or take actions requested by callers.
+
+If the optional Caller relay URL and token are present, a successfully
+reported inbound call queues one idempotent `message` mode alert through the
+paired Caller app. Its text only says Hermes answered an incoming call; it
+contains no caller number or transcript, so lock-screen previews remain low
+detail. Relay acceptance does not prove the iPhone displayed the alert.
 
 ### Model verification
 
