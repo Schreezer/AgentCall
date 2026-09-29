@@ -1,6 +1,6 @@
 # Vobiz inbound and later Jio Busy forwarding
 
-**Status:** Preparation only. The purchased Vobiz number is not attached to this route, Jio forwarding is not enabled, and a real inbound call has not been proven. Keep the inbound Worker switch off until the checks below pass. DebianBat is the sole Hermes production host; this Mac is an administration client.
+**Status (29 September 2026):** The isolated Vobiz Worker is deployed with `VOBIZ_INBOUND_ENABLED=false`, remote D1 migrations `0002`–`0005` are applied, and its public `/health` reports `storage_ready:true`. DebianBat remains unreachable, so the standalone voice bridge and public WSS route are not fully installed or verified. The purchased Vobiz number is not attached to this route, Jio forwarding is not enabled, and no real inbound call or iPhone alert has been proven. Keep the inbound Worker switch off until the checks below pass. DebianBat is the sole Hermes production host; this Mac is an administration client.
 
 ## Intended path
 
