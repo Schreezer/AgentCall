@@ -1,0 +1,23 @@
+[Unit]
+Description=Caller outbound Vobiz to Codex WebRTC bridge
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=chirag
+Group=chirag
+Environment=HOME=/home/chirag
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/home/chirag/.config/caller-vobiz-bridge.env
+WorkingDirectory=/home/chirag/.local/share/caller-vobiz-bridge
+ExecStart=/home/chirag/.local/share/caller-vobiz-bridge/venv/bin/python /home/chirag/.local/share/caller-vobiz-bridge/scripts/vobiz_codex_bridge.py --host 127.0.0.1 --port 8793 --env-file /home/chirag/.config/caller-vobiz-bridge.env
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=20
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

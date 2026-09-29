@@ -1,0 +1,5 @@
+# Insert inside claw.forgeme.xyz's existing site block. handle_path removes
+# /caller-vobiz, so public /caller-vobiz/vobiz becomes local /vobiz.
+handle_path /caller-vobiz/* {
+    reverse_proxy 127.0.0.1:8793
+}
