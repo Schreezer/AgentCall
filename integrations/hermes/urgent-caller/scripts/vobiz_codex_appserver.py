@@ -26,6 +26,13 @@ CODEX_V3_VOICES = frozenset({
 SUPPORTED_CODEX_SERIES = (0, 158)
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """Prevent bearer credentials from being replayed to a redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "relay_redirect_refused", headers, fp)
+
+
 def parse_env_file(path: pathlib.Path) -> dict[str, str]:
     if not path.is_file():
         return {}
@@ -88,17 +95,21 @@ async def http_json(url: str, *, method="GET", token: str, body=None,
         if idempotency_key:
             headers["idempotency-key"] = idempotency_key
         request = urllib.request.Request(url, data=data, method=method, headers=headers)
+        opener = urllib.request.build_opener(_RejectRedirects())
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with opener.open(request, timeout=timeout) as response:
                 raw = response.read(65_537)
                 if len(raw) > 65_536:
                     raise RuntimeError("relay_response_too_large")
                 return response.status, json.loads(raw)
         except urllib.error.HTTPError as error:
             try:
-                return error.code, json.loads(error.read(65_536))
-            except ValueError:
-                return error.code, None
+                try:
+                    return error.code, json.loads(error.read(65_536))
+                except ValueError:
+                    return error.code, None
+            finally:
+                error.close()
     return await asyncio.to_thread(perform)
 
 
