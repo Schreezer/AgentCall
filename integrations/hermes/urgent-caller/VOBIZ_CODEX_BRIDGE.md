@@ -68,10 +68,11 @@ produce a file-tool call; the canary cannot prove future Codex versions have no
 built-in tools. The launcher still shares networking for WebRTC; test and
 restrict that separately if expanding this pilot's privileges.
 
-`CALLER_VOBIZ_L16_ENDIAN` defaults to `big`, the network-order interpretation
-of L16. Vobiz's public docs specify signed 16-bit PCM but do not state byte
-order; confirm intelligible input and output in the authorized self-call. Set
-`little` only if that call or Vobiz support confirms it. The service process
+`CALLER_VOBIZ_L16_ENDIAN` defaults to `little` for both inbound Linear16 and
+outbound `playAudio`. The first connected carrier test used `big`: the bridge
+sent Codex audio but the callee heard silence. Sarvam's Vobiz integration guide
+specifies raw little-endian Linear16 for `playAudio`. Keep this setting explicit
+for the account and verify intelligible input and output in a live call. The service process
 must use Hermes's Python environment or otherwise be able to import
 `agent.credential_pool`.
 

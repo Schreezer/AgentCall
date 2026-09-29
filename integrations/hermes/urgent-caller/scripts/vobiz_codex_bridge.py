@@ -413,7 +413,7 @@ def _mulaw_sample(value: int) -> int:
 MULAW_TABLE = tuple(_mulaw_sample(value) for value in range(256))
 
 
-def decode_vobiz_audio(payload: str, encoding: str, sample_rate: int, endian: str = "big") -> bytes:
+def decode_vobiz_audio(payload: str, encoding: str, sample_rate: int, endian: str = "little") -> bytes:
     """Return native little-endian signed PCM16 for the WebRTC audio track."""
     try:
         raw = base64.b64decode(payload, validate=True)
@@ -441,7 +441,7 @@ def pcm_rms(pcm: bytes) -> int:
     return math.isqrt(sum(sample * sample for sample in samples) // len(samples))
 
 
-def connecting_tone_frame(frame_index: int, endian: str = "big") -> bytes | None:
+def connecting_tone_frame(frame_index: int, endian: str = "little") -> bytes | None:
     """A clear India-style 400 Hz ring cadence for the already answered media leg.
 
     Each frame is 50 ms at 24 kHz. The cadence is 0.4 s on, 0.2 s off,
@@ -609,7 +609,7 @@ class VobizInputTrack:
 
 class CodexPSTNSession:
     def __init__(self, app: AppServer, socket, stream_id: str, context: dict,
-                 input_track: VobizInputTrack, l16_endian: str = "big"):
+                 input_track: VobizInputTrack, l16_endian: str = "little"):
         self.app = app
         self.socket = socket
         self.stream_id = stream_id
@@ -878,7 +878,7 @@ class CodexPSTNSession:
 
 class VobizCodexBridge:
     def __init__(self, *, relay_url: str, agent_token: str, stream_secret: str,
-                 codex_command: str, l16_endian: str = "big", allow_inbound: bool = False,
+                 codex_command: str, l16_endian: str = "little", allow_inbound: bool = False,
                  caller_relay_url: str = "", caller_agent_token: str = "",
                  spool_dir: str | pathlib.Path | None = None):
         relay_url = validated_http_origin(relay_url, "VOBIZ_RELAY_URL")
@@ -1426,7 +1426,7 @@ def main() -> int:
         agent_token=env_value("VOBIZ_RELAY_TOKEN", stored),
         stream_secret=env_value("VOBIZ_BRIDGE_SECRET", stored),
         codex_command=launcher,
-        l16_endian=env_value("CALLER_VOBIZ_L16_ENDIAN", stored) or "big",
+        l16_endian=env_value("CALLER_VOBIZ_L16_ENDIAN", stored) or "little",
         allow_inbound=enabled_flag(env_value("VOBIZ_BRIDGE_ALLOW_INBOUND", stored)),
         caller_relay_url=env_value("CALLER_RELAY_URL", stored),
         caller_agent_token=env_value("CALLER_AGENT_TOKEN", stored),

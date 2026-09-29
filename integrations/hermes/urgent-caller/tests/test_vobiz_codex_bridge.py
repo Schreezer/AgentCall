@@ -286,8 +286,8 @@ class VobizBridgeTests(unittest.TestCase):
 
     def test_decodes_vobiz_l16_and_mulaw_with_declared_format(self):
         pcm = b"\x34\x12\x78\x56"
-        self.assertEqual(bridge.decode_vobiz_audio(base64.b64encode(b"\x12\x34\x56\x78").decode(), "audio/x-l16", 16000), pcm)
-        self.assertEqual(bridge.decode_vobiz_audio(base64.b64encode(pcm).decode(), "audio/x-l16", 16000, "little"), pcm)
+        self.assertEqual(bridge.decode_vobiz_audio(base64.b64encode(pcm).decode(), "audio/x-l16", 16000), pcm)
+        self.assertEqual(bridge.decode_vobiz_audio(base64.b64encode(b"\x12\x34\x56\x78").decode(), "audio/x-l16", 16000, "big"), pcm)
         silence = bridge.decode_vobiz_audio(base64.b64encode(b"\xff\xff").decode(), "audio/x-mulaw", 8000)
         self.assertEqual(silence, b"\x00\x00\x00\x00")
         with self.assertRaises(ValueError):
@@ -298,7 +298,7 @@ class VobizBridgeTests(unittest.TestCase):
     def test_connecting_tone_uses_audible_india_cadence_and_declared_pcm(self):
         frame = bridge.connecting_tone_frame(0)
         self.assertEqual(len(frame), bridge.CONNECTING_TONE_RATE // 20 * 2)
-        samples = struct.unpack(">" + "h" * (len(frame) // 2), frame)
+        samples = struct.unpack("<" + "h" * (len(frame) // 2), frame)
         self.assertGreater(max(samples), 5000)
         self.assertLessEqual(max(samples), 9000)
         self.assertIsNone(bridge.connecting_tone_frame(8))
@@ -307,8 +307,8 @@ class VobizBridgeTests(unittest.TestCase):
         self.assertIsNone(bridge.connecting_tone_frame(20))
         self.assertIsNone(bridge.connecting_tone_frame(59))
         self.assertEqual(bridge.connecting_tone_frame(60), frame)
-        little = bridge.connecting_tone_frame(0, "little")
-        self.assertEqual(little[:2], frame[:2][::-1])
+        big = bridge.connecting_tone_frame(0, "big")
+        self.assertEqual(big[:2], frame[:2][::-1])
 
     def test_connecting_tone_handoff_clears_audio_before_first_model_speech(self):
         async def check():
@@ -334,7 +334,7 @@ class VobizBridgeTests(unittest.TestCase):
                     raise asyncio.CancelledError()
 
             socket = Socket()
-            tone = bridge.CallConnectingTone(socket, "stream-test", "big")
+            tone = bridge.CallConnectingTone(socket, "stream-test", "little")
             tone.start()
             await asyncio.sleep(0)
             session = bridge.CodexPSTNSession(None, socket, "stream-test", {}, None)
@@ -361,8 +361,7 @@ class VobizBridgeTests(unittest.TestCase):
                              ["playAudio", "clearAudio", "playAudio"])
             self.assertEqual(socket.events[-1]["media"]["sampleRate"], 24000)
             self.assertEqual(base64.b64decode(socket.events[-1]["media"]["payload"]),
-                             b"".join(Frame.planes[0][i:i + 2][::-1]
-                                      for i in range(0, len(Frame.planes[0]), 2)))
+                             Frame.planes[0])
             await tone.stop()
             count = len(socket.events)
             await asyncio.sleep(0.12)
