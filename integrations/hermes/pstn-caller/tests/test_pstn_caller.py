@@ -34,7 +34,7 @@ class PstnCallerTests(unittest.TestCase):
 
         def send(request, timeout):
             requests.append(request)
-            self.assertEqual(timeout, 15)
+            self.assertEqual(timeout, 65)
             return Response({"id": "pstn_12345678", "status": "queued", "to_number": "+919876543210"})
 
         with patch.dict(module.os.environ, {"HERMES_PSTN_RELAY_URL": "https://relay.example", "HERMES_PSTN_TOKEN": "secret"}):
@@ -60,7 +60,7 @@ class PstnCallerTests(unittest.TestCase):
     def test_exact_opening_speech_is_sent_only_when_supplied(self):
         opening = "Hi Chirag, this is your Hermes AI agent. How are you doing?"
         def send(request, timeout):
-            self.assertEqual(timeout, 15)
+            self.assertEqual(timeout, 65)
             self.assertEqual(json.loads(request.data)["opening_speech"], opening)
             return Response({"id": "pstn_12345678", "status": "queued"})
 

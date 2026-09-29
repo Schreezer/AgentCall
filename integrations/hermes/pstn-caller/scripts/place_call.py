@@ -149,7 +149,11 @@ def start(args):
             raise PstnRelayError("Opening speech must be one nonempty line of at most 320 characters")
         payload["opening_speech"] = speech
     base, token = credentials()
-    result = request(base, token, "/v1/pstn-calls", body=payload, idempotency_key=args.idempotency_key)
+    # The relay prepares the call-specific Codex realtime connection before it
+    # asks Vobiz to dial. Keep the client open through that bounded setup and
+    # the provider's dispatch window.
+    result = request(base, token, "/v1/pstn-calls", body=payload,
+                     idempotency_key=args.idempotency_key, timeout=65)
     if not isinstance(result.get("id"), str) or not isinstance(result.get("status"), str):
         raise PstnRelayError("PSTN relay returned a call without an ID or status")
     return {

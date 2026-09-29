@@ -23,7 +23,7 @@ For a recurring check-in, use Hermes's existing scheduler with the approved time
      --idempotency-key '<new-uuid-for-this-request>'
    ```
 
-   When Chirag supplies exact words for the first line, add `--opening-speech` with those words. For the approved self-test, use `--opening-speech "Hi Chirag, this is your Hermes AI agent. How are you doing?"`. Otherwise omit this option and let the relay use its generic greeting. Keep the conversation objective in `--briefing`; the opening line alone does not describe the task.
+   When Chirag supplies exact words for the first line, add `--opening-speech` with those words. For the approved self-test, use `--opening-speech "Hi Chirag, this is your Hermes AI agent. How are you doing?"`. Otherwise omit this option and let the relay use its generic greeting. Keep the conversation objective in `--briefing`; the opening line alone does not describe the task. The start request can take up to 65 seconds while the relay prepares GPT Live before dialing; after a timeout, retry only with the same idempotency key.
 
 3. Keep the returned call ID. Wait for a result when the request can remain active for up to 60 seconds:
 
