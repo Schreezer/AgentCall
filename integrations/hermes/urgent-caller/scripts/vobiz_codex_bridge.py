@@ -266,6 +266,11 @@ class CodexPSTNSession:
                     self.transcript.append({"role": role, "text": text})
                 if role == "assistant":
                     asyncio.create_task(self._checkpoint_after_output())
+        elif method == "model/rerouted":
+            # The thread/start model is configured state, not a per-turn
+            # guarantee. Any runtime reroute invalidates this Sol-only pilot.
+            self.realtime_error.set()
+            print("[caller vobiz] Codex reasoning model rerouted", file=sys.stderr)
         elif method == "thread/realtime/error":
             self.realtime_error.set()
             # Do not surface raw model errors or identifiers to the caller.

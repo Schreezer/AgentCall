@@ -18,7 +18,7 @@ bounded, OTP-redacted transcript to the isolated outbound Worker at call end.
 
 ## Runtime
 
-Use Python 3.11 or newer, **Codex CLI 0.158.0 or newer**, and an isolated virtual environment with
+Use Python 3.11 or newer, **Codex CLI 0.158.x**, and an isolated virtual environment with
 [`requirements-vobiz-bridge.txt`](requirements-vobiz-bridge.txt). Put the three new
 scripts `scripts/vobiz_codex_bridge.py` and `scripts/vobiz_codex_appserver.py`
 side by side in the service directory, along with executable
@@ -51,7 +51,8 @@ credential pool and passes ChatGPT auth tokens to Codex over App Server stdio.
 It starts an ephemeral read-only `gpt-6-sol` thread with no environments or
 dynamic tools. It explicitly rejects provider model fallback and checks both
 model fields returned by `thread/start` before opening WebRTC media. A missing
-or different model fails the call and keeps readiness false. The realtime
+or different startup model keeps readiness false. Any `model/rerouted`
+notification during a call aborts that call. The realtime
 session leaves its `model` unset, selecting Codex's supported GPT-Live speech
 model. The thread's developer instructions restrict its text responses to the
 approved call brief.
@@ -133,7 +134,9 @@ Caddy should expose `https://claw.forgeme.xyz/caller-vobiz/*` through
 and no call occupies this one-call pilot. On startup, the bridge starts and
 verifies a `gpt-6-sol` thread, performs a ChatGPT-authenticated synthetic
 WebRTC SDP/ICE exchange, and requires nonzero audio before exposing
-`codex_ready: true`. Each actual call still has its own
+`codex_ready: true`. This startup check proves the configured Sol thread and
+voice transport; it does not exercise a substantive backend handoff. Each
+actual call still has its own
 SDP/ICE/media exchange.
 The bridge ends an idle answered call after 45 seconds without speech and
 enforces a 180-second answered-call limit. On idle end, it checkpoints the
@@ -163,7 +166,8 @@ inbound tokens are rejected before a Codex session starts.
 
 ### Model verification
 
-Local Codex 0.158.0 testing with ChatGPT authentication confirmed the split
+This pilot accepts only the Codex 0.158 series; the following handoff was
+verified on local 0.158.0. ChatGPT authentication confirmed the split
 model path: `thread/start` returned `model: gpt-6-sol`; a synthetic spoken
 arithmetic request caused a realtime `handoff_request` and a Codex
 `turn/completed` on that same Sol thread; GPT-Live then spoke the delegated
@@ -174,8 +178,10 @@ An ordinary math question without the delegation instruction was answered
 directly by GPT-Live. This is why the prompt now requests delegation for
 substantive turns. App Server does not guarantee that every spoken reply is
 Sol-generated, so the service does not claim that; simple conversational
-speech may come from GPT-Live. Verify the handoff event trace again after a
-Codex upgrade. DebianBat's installed Codex version and CPU/media support
+speech may come from GPT-Live. A runtime `model/rerouted` event fails the call
+because the configured model can differ from per-turn execution. Verify the
+handoff event trace before admitting another Codex series. DebianBat's
+installed Codex version and CPU/media support
 remain to be checked on the host before enabling outbound calls.
 
 The [GPT-6 Sol model page](https://developers.openai.com/api/docs/models/gpt-6-sol)

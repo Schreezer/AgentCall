@@ -23,7 +23,7 @@ DEFAULT_CODEX_VOICE = "sol"
 CODEX_V3_VOICES = frozenset({
     "juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove",
 })
-MINIMUM_CODEX_VERSION = (0, 158, 0)
+SUPPORTED_CODEX_SERIES = (0, 158)
 
 
 def parse_env_file(path: pathlib.Path) -> dict[str, str]:
@@ -65,8 +65,8 @@ def codex_version(command: str) -> str | None:
 
 def codex_version_supported(value: str | None) -> bool:
     try:
-        pieces = tuple(int(piece) for piece in str(value).split(".")[:3])
-        return len(pieces) == 3 and pieces >= MINIMUM_CODEX_VERSION
+        pieces = tuple(int(piece) for piece in str(value).split("."))
+        return len(pieces) == 3 and pieces[:2] == SUPPORTED_CODEX_SERIES
     except (TypeError, ValueError):
         return False
 

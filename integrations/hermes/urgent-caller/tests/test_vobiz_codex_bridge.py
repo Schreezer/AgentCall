@@ -65,6 +65,22 @@ class VobizBridgeTests(unittest.TestCase):
                 bridge.verified_sol_thread_id(changed)
         self.assertFalse(codex_version_supported("0.157.9"))
         self.assertTrue(codex_version_supported("0.158.0"))
+        self.assertTrue(codex_version_supported("0.158.9"))
+        self.assertFalse(codex_version_supported("0.159.0"))
+
+    def test_runtime_model_reroute_fails_only_the_matching_call(self):
+        session = bridge.CodexPSTNSession(None, None, "stream-test", {}, None)
+        session.thread_id = "sol-thread"
+        session._notification("model/rerouted", {
+            "threadId": "other-thread", "turnId": "other-turn",
+            "fromModel": "gpt-6-sol", "toModel": "gpt-6-luna", "reason": "unavailable",
+        })
+        self.assertFalse(session.realtime_error.is_set())
+        session._notification("model/rerouted", {
+            "threadId": "sol-thread", "turnId": "this-turn",
+            "fromModel": "gpt-6-sol", "toModel": "gpt-6-luna", "reason": "unavailable",
+        })
+        self.assertTrue(session.realtime_error.is_set())
 
     def test_call_pins_sol_before_media_and_fails_on_provider_fallback(self):
         async def check():
