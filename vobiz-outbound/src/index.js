@@ -2,6 +2,7 @@ const E164_INDIA = /^\+91[1-9]\d{9}$/;
 const CALLBACK_BYTES = 16_384;
 const MAX_CALL_MS = 3 * 60_000;
 const MAX_OPENING_SPEECH_CHARS = 320;
+const PROVIDER_PROBE_BYTES = 16_384;
 const NOTIFICATION_CLAIM_DELAY_MS = 30_000;
 const NOTIFICATION_MESSAGE = "Hermes answered an incoming call. Ask Hermes for the call result.";
 const INBOUND_REPORT_PREFIX = "Caller said: ";
@@ -342,6 +343,135 @@ export async function getPstnCall(env, callID) {
   return row ? json(200, publicCall(row)) : json(404, { error: "call_not_found" });
 }
 
+function providerCode(value, pattern = /^[a-z0-9_-]{1,40}$/i) {
+  const text = typeof value === "number" && Number.isSafeInteger(value)
+    ? String(value) : value;
+  return typeof text === "string" && pattern.test(text) ? text : null;
+}
+
+function providerSeconds(value) {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 86_400 ? value : null;
+}
+
+function providerSnapshot(source, result, expectedUUID) {
+  const data = Array.isArray(result?.data) && result.data.length === 1
+    ? result.data[0] : result?.data && !Array.isArray(result.data) ? result.data : result;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const returnedUUID = data.call_uuid ?? data.request_uuid ?? data.uuid;
+  if (returnedUUID && (!isUUID(returnedUUID) || returnedUUID.toLowerCase() !== expectedUUID)) return null;
+  if (source !== "cdr" && (!returnedUUID || !providerCode(data.call_status))) return null;
+  if (source === "cdr" && data.success === false) return null;
+  if (source === "cdr" && !returnedUUID &&
+      !("hangup_cause" in data) && !("failure_code" in data) && !("billsec" in data)) return null;
+  const duration = source === "cdr" ? providerSeconds(data.duration) : null;
+  const billsec = source === "cdr" ? providerSeconds(data.billsec) : null;
+  const ringTime = source === "cdr" ? providerSeconds(data.ring_time) : null;
+  return {
+    source,
+    state: source === "cdr" ? "ended" : providerCode(data.call_status),
+    ...(source === "cdr" ? {
+      hangup_cause: providerCode(data.hangup_cause, /^[A-Z0-9_]{1,40}$/),
+      hangup_cause_code: providerCode(data.hangup_cause_code, /^\d{1,8}$/),
+      failure_code: providerCode(data.failure_code, /^(?:[A-Za-z_][A-Za-z0-9_-]{0,39}|\d{1,8})$/),
+      ...(ringTime !== null ? { ring_time_seconds: ringTime } : {}),
+      answer_time_present: typeof data.answer_time === "string" && data.answer_time.trim().length > 0,
+      ...(duration !== null ? { duration } : {}),
+      ...(billsec !== null ? { billsec } : {}),
+      hangup_source: ["Caller", "Callee"].includes(data.hangup_source) ? data.hangup_source : null,
+      hangup_disposition: ["send_bye", "recv_bye"].includes(data.hangup_disposition)
+        ? data.hangup_disposition : null,
+    } : {}),
+  };
+}
+
+export async function getPstnProviderStatus(env, callID, fetcher = fetch) {
+  if (!isUUID(callID)) return json(404, { error: "call_not_found" });
+  const row = await env.DB.prepare(
+    "SELECT vobiz_call_uuid FROM vobiz_pstn_calls WHERE id = ?1",
+  ).bind(callID.toLowerCase()).first();
+  if (!row) return json(404, { error: "call_not_found" });
+  if (!isUUID(row.vobiz_call_uuid)) return json(409, { error: "provider_call_id_unavailable" });
+  if (!env.VOBIZ_AUTH_ID || !env.VOBIZ_AUTH_TOKEN) {
+    return json(503, { error: "vobiz_credentials_unavailable" });
+  }
+
+  const providerUUID = row.vobiz_call_uuid.toLowerCase();
+  const account = encodeURIComponent(env.VOBIZ_AUTH_ID);
+  const call = encodeURIComponent(providerUUID);
+  const base = `https://api.vobiz.ai/api/v1/Account/${account}`;
+  const probes = [
+    ["queued", `${base}/Call/${call}/?status=queued`],
+    ["live", `${base}/Call/${call}/?status=live`],
+    ["cdr", `${base}/cdr/${call}`],
+  ];
+  for (const [source, endpoint] of probes) {
+    try {
+      const response = await fetcher(endpoint, {
+        method: "GET",
+        headers: {
+          "accept": "application/json",
+          "x-auth-id": env.VOBIZ_AUTH_ID,
+          "x-auth-token": env.VOBIZ_AUTH_TOKEN,
+        },
+        redirect: "manual",
+        signal: AbortSignal.timeout(2_500),
+      });
+      if (response.status === 404) continue;
+      if (!response.ok) return json(502, { error: "provider_lookup_failed", provider_http_status: response.status });
+      const result = JSON.parse(await boundedText(response, PROVIDER_PROBE_BYTES));
+      const snapshot = providerSnapshot(source, result, providerUUID);
+      if (!snapshot) return json(502, { error: "provider_response_invalid" });
+      return json(200, { call_id: callID.toLowerCase(), provider: snapshot });
+    } catch {
+      // No provider response body, credentials, or request URL enters logs or the API response.
+      return json(502, { error: "provider_lookup_unavailable" });
+    }
+  }
+  return json(404, { error: "provider_record_not_found" });
+}
+
+function reconcilableOutbound(row) {
+  return row && row.direction === "outbound" && row.ended_at == null &&
+    row.bridge_claimed_at == null &&
+    ["dispatching", "queued", "ringing", "dispatch_unknown"].includes(row.status);
+}
+
+export async function reconcilePstnCall(env, callID, fetcher = fetch) {
+  if (!isUUID(callID)) return json(404, { error: "call_not_found" });
+  const id = callID.toLowerCase();
+  const row = await env.DB.prepare(
+    "SELECT * FROM vobiz_pstn_calls WHERE id = ?1",
+  ).bind(id).first();
+  if (!row) return json(404, { error: "call_not_found" });
+  if (!reconcilableOutbound(row)) return json(200, publicCall(row));
+
+  const probe = await getPstnProviderStatus(env, id, fetcher);
+  if (!probe.ok) return probe;
+  const { provider } = await probe.json();
+  if (provider.source !== "cdr") {
+    const current = await env.DB.prepare(
+      "SELECT * FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(id).first();
+    return current
+      ? json(409, { error: "provider_call_not_final", provider, call: publicCall(current) })
+      : json(404, { error: "call_not_found" });
+  }
+
+  const now = Date.now();
+  await env.DB.prepare(
+    `UPDATE vobiz_pstn_calls
+        SET status = 'failed', provider_status = 'provider_ended_without_callback',
+            updated_at = ?2, ended_at = ?2
+      WHERE id = ?1 AND direction = 'outbound' AND vobiz_call_uuid = ?3
+        AND ended_at IS NULL AND bridge_claimed_at IS NULL
+        AND status IN ('dispatching', 'queued', 'ringing', 'dispatch_unknown')`,
+  ).bind(id, now, row.vobiz_call_uuid).run();
+  const current = await env.DB.prepare(
+    "SELECT * FROM vobiz_pstn_calls WHERE id = ?1",
+  ).bind(id).first();
+  return current ? json(200, publicCall(current)) : json(404, { error: "call_not_found" });
+}
+
 export async function listInboundCalls(env) {
   const result = await env.DB.prepare(
     `SELECT calls.*,
@@ -391,43 +521,56 @@ async function boundedText(request, limit) {
   }
 }
 
-async function verifiedCallback(request, env, requireSignature = false) {
+async function verifiedCallback(request, env, requireSignature = false,
+  onReject = /** @type {(reason: string) => void} */ (() => {})) {
+  const reject = (reason) => { onReject(reason); return null; };
   const origin = baseURL(env);
   const url = new URL(request.url);
-  if (!origin || url.origin !== origin || url.search || url.hash) return null;
+  if (!origin || url.origin !== origin || url.search || url.hash) return reject("url_mismatch");
   // Legacy V1 and MA-only headers do not imply a standard V2/V3 signature is present.
   const hasSignatureHeader = request.headers.has("x-vobiz-signature-v3") ||
     request.headers.has("x-vobiz-signature-v2");
-  if (requireSignature && !hasSignatureHeader) return null;
+  if (requireSignature && !hasSignatureHeader) return reject("signature_missing");
   let nonce = null;
   if (hasSignatureHeader) {
     const version = request.headers.has("x-vobiz-signature-v3") ? "v3" : "v2";
     const signature = request.headers.get(`x-vobiz-signature-${version}`);
     nonce = request.headers.get(`x-vobiz-signature-${version}-nonce`);
-    if (!signature || !/^\d{20}$/.test(nonce || "")) return null;
+    if (!signature || !/^\d{20}$/.test(nonce || "")) return reject("signature_nonce_invalid");
     let signatureBytes;
     try {
       signatureBytes = Uint8Array.from(atob(signature), (character) => character.charCodeAt(0));
     } catch {
-      return null;
+      return reject("signature_encoding_invalid");
     }
-    if (signatureBytes.byteLength !== 32) return null;
+    if (signatureBytes.byteLength !== 32) return reject("signature_length_invalid");
     const key = await crypto.subtle.importKey(
       "raw", new TextEncoder().encode(env.VOBIZ_AUTH_TOKEN),
       { name: "HMAC", hash: "SHA-256" }, false, ["verify"],
     );
     const message = `${origin}${url.pathname}${version === "v3" ? "." : ""}${nonce}`;
-    if (!(await crypto.subtle.verify("HMAC", key, signatureBytes, new TextEncoder().encode(message)))) return null;
+    if (!(await crypto.subtle.verify("HMAC", key, signatureBytes, new TextEncoder().encode(message)))) {
+      return reject("signature_mismatch");
+    }
   }
   let raw;
   try {
     raw = await boundedText(request, CALLBACK_BYTES);
   } catch {
-    return null;
+    return reject("body_invalid");
   }
-  if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/x-www-form-urlencoded")) return null;
+  if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/x-www-form-urlencoded")) {
+    return reject("content_type_invalid");
+  }
   const params = new URLSearchParams(raw);
-  if (params.get("auth_id") !== env.VOBIZ_AUTH_ID || !isUUID(params.get("CallUUID"))) return null;
+  if (requireSignature) {
+    const authIDs = params.getAll("auth_id");
+    if (!authIDs.length) return reject("auth_id_missing");
+    if (authIDs.length !== 1 || authIDs[0] !== env.VOBIZ_AUTH_ID) return reject("auth_id_mismatch");
+    const callUUIDs = params.getAll("CallUUID");
+    if (!callUUIDs.length) return reject("call_uuid_missing");
+    if (callUUIDs.length !== 1 || !isUUID(callUUIDs[0])) return reject("call_uuid_invalid");
+  }
   if (nonce) {
     // Inbound Answer URLs are fixed and have no per-call secret. Retain their signed
     // nonces so a captured URL signature cannot be reused with a new form body later.
@@ -442,7 +585,7 @@ async function verifiedCallback(request, env, requireSignature = false) {
       const prior = await env.DB.prepare(
         `SELECT path_hash, body_hash FROM ${nonceTable} WHERE nonce = ?1`,
       ).bind(nonce).first();
-      if (prior?.path_hash !== pathHash || prior?.body_hash !== bodyHash) return null;
+      if (prior?.path_hash !== pathHash || prior?.body_hash !== bodyHash) return reject("nonce_replay_mismatch");
     }
     if (!requireSignature) {
       // Outbound callbacks also carry a unique per-call URL token.
@@ -466,22 +609,22 @@ export async function handleVobizCallback(request, env, kind, callID, callbackTo
   const row = await env.DB.prepare("SELECT * FROM vobiz_pstn_calls WHERE id = ?1")
     .bind(callID.toLowerCase()).first();
   if (!row || !(await secretEqual(await hashCredential(callbackToken || ""), row.callback_token_hash))) {
+    console.warn(JSON.stringify({ message: "Vobiz outbound callback rejected", kind,
+      reason: row ? "token_invalid" : "call_not_found" }));
     return json(403, { error: "invalid_vobiz_callback_token" });
   }
-  const params = await verifiedCallback(request, env);
+  const params = await verifiedCallback(request, env, false, (reason) => {
+    console.warn(JSON.stringify({ message: "Vobiz outbound callback rejected", kind, reason }));
+  });
   if (!params) return json(403, { error: "invalid_vobiz_callback" });
-  const event = params.get("Event");
-  const eventExpected = { answer: "StartApp", ring: "Ring", hangup: "Hangup" };
-  if (event !== eventExpected[kind]) return json(400, { error: "unexpected_vobiz_event" });
-  const providerUUID = params.get("CallUUID").toLowerCase();
-  const from = normalizedCallbackNumber(params.get("From"));
-  const to = normalizedCallbackNumber(params.get("To"));
-  if (row.direction !== "outbound" ||
-    (params.has("To") && row.to_number !== to) ||
-    (params.has("From") && row.from_number !== from) ||
-    (row.vobiz_call_uuid && row.vobiz_call_uuid !== providerUUID)) {
-    return json(403, { error: "vobiz_call_mismatch" });
+  const identity = outboundCallbackIdentity(params, env, kind, row);
+  if (!identity.ok) {
+    console.warn(JSON.stringify({ message: "Vobiz outbound callback rejected", kind, reason: identity.reason }));
+    return identity.reason === "event_mismatch"
+      ? json(400, { error: "unexpected_vobiz_event" })
+      : json(403, { error: "vobiz_call_mismatch" });
   }
+  const providerUUID = identity.providerUUID;
   if (row.ended_at && kind !== "hangup") return xmlResponse("<?xml version=\"1.0\"?><Response><Hangup/></Response>");
   if (kind === "answer") {
     if (!(await bridgeReady(env, fetcher))) {
@@ -537,6 +680,51 @@ const HANGUP_XML = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></R
 function oneParameter(params, name) {
   const values = params.getAll(name);
   return values.length === 1 ? values[0] : null;
+}
+
+function outboundCallbackIdentity(params, env, kind, row) {
+  const expectedEvent = { answer: "StartApp", ring: "Ring", hangup: "Hangup" }[kind];
+  if (oneParameter(params, "Event") !== expectedEvent) {
+    return { ok: false, reason: "event_mismatch" };
+  }
+
+  const authIDs = params.getAll("auth_id");
+  if (authIDs.length > 1 || (authIDs.length === 1 && authIDs[0] !== env.VOBIZ_AUTH_ID)) {
+    return { ok: false, reason: "call_mismatch" };
+  }
+  const directions = params.getAll("Direction");
+  if (directions.length > 1 || (directions.length === 1 && directions[0] !== "outbound")) {
+    return { ok: false, reason: "call_mismatch" };
+  }
+
+  const requestUUIDs = params.getAll("RequestUUID");
+  const callUUIDs = params.getAll("CallUUID");
+  if (requestUUIDs.length > 1 || callUUIDs.length > 1 ||
+      (!requestUUIDs.length && !callUUIDs.length)) {
+    return { ok: false, reason: "call_mismatch" };
+  }
+  const requestUUID = requestUUIDs.length === 1 && isUUID(requestUUIDs[0])
+    ? requestUUIDs[0].toLowerCase() : null;
+  const callUUID = callUUIDs.length === 1 && isUUID(callUUIDs[0])
+    ? callUUIDs[0].toLowerCase() : null;
+  if ((requestUUIDs.length && !requestUUID) || (callUUIDs.length && !callUUID) ||
+      (requestUUID && callUUID && requestUUID !== callUUID)) {
+    return { ok: false, reason: "call_mismatch" };
+  }
+  const providerUUID = requestUUID || callUUID;
+  if (row.direction !== "outbound" ||
+      (row.vobiz_call_uuid && row.vobiz_call_uuid.toLowerCase() !== providerUUID)) {
+    return { ok: false, reason: "call_mismatch" };
+  }
+
+  for (const [name, expected] of [["From", row.from_number], ["To", row.to_number]]) {
+    const values = params.getAll(name);
+    if (values.length > 1 ||
+        (values.length === 1 && normalizedCallbackNumber(values[0]) !== expected)) {
+      return { ok: false, reason: "call_mismatch" };
+    }
+  }
+  return { ok: true, providerUUID };
 }
 
 function inboundCallbackFields(params, kind, env) {
@@ -967,6 +1155,18 @@ const worker = {
       if (request.method === "GET" && call) {
         if (!(await validBearer(request, env.HERMES_PSTN_TOKEN))) return json(401, { error: "invalid_agent_credential" });
         return await getPstnCall(env, call[1]);
+      }
+      const providerStatus = url.pathname.match(/^\/v1\/pstn-calls\/([0-9a-f-]+)\/provider-status$/i);
+      if (request.method === "GET" && providerStatus) {
+        if (!(await validBearer(request, env.HERMES_PSTN_TOKEN))) return json(401, { error: "invalid_agent_credential" });
+        if (url.search || url.hash) return json(400, { error: "unexpected_query" });
+        return await getPstnProviderStatus(env, providerStatus[1]);
+      }
+      const reconcile = url.pathname.match(/^\/v1\/pstn-calls\/([0-9a-f-]+)\/reconcile$/i);
+      if (request.method === "POST" && reconcile) {
+        if (!(await validBearer(request, env.HERMES_PSTN_TOKEN))) return json(401, { error: "invalid_agent_credential" });
+        if (url.search || url.hash) return json(400, { error: "unexpected_query" });
+        return await reconcilePstnCall(env, reconcile[1]);
       }
 
       if (url.pathname === "/v1/inbound-calls" && request.method === "GET") {

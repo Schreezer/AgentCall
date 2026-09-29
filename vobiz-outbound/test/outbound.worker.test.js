@@ -1,7 +1,8 @@
 import { env } from "cloudflare:workers";
 import { SELF } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import worker, { createPstnCall, getPstnCall, handleVobizCallback } from "../src/index.js";
+import worker, { createPstnCall, getPstnCall, getPstnProviderStatus,
+  handleVobizCallback, reconcilePstnCall } from "../src/index.js";
 
 const AGENT = "test-hermes-token-32-chars-long-value";
 const BRIDGE = "test-bridge-token-32-chars-long-value";
@@ -57,6 +58,14 @@ function unsignedCallback(path, event, nationalNumbers = false, extra = {}, prov
       To: nationalNumbers ? DESTINATION.slice(3) : DESTINATION,
       auth_id: "test-auth", ...extra,
     }).toString(),
+  });
+}
+
+function callbackWithParameters(path, entries, headers = {}) {
+  return new Request(`https://relay.example${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
+    body: new URLSearchParams(entries).toString(),
   });
 }
 
@@ -123,11 +132,41 @@ describe("isolated Vobiz outbound relay", () => {
       { "x-vobiz-signature": "legacy-header-is-not-v2-or-v3" }))).status).toBe(200);
     expect((await SELF.fetch(unsignedCallback(ringPath, "Ring", false, {}, PROVIDER_ID,
       { "x-vobiz-signature-ma-v3": "multi-account-header-is-not-standard-v3" }))).status).toBe(200);
+    expect((await SELF.fetch(callbackWithParameters(ringPath, [
+      ["Event", "Ring"], ["RequestUUID", PROVIDER_ID], ["Direction", "outbound"],
+      ["From", DID], ["To", DESTINATION],
+    ]))).status).toBe(200);
+    expect((await SELF.fetch(callbackWithParameters(ringPath, [
+      ["Event", "Ring"], ["RequestUUID", PROVIDER_ID], ["CallUUID", PROVIDER_ID],
+      ["auth_id", "test-auth"],
+    ]))).status).toBe(200);
+    expect((await SELF.fetch(callbackWithParameters(ringPath, [
+      ["Event", "Ring"], ["CallUUID", PROVIDER_ID], ["auth_id", "wrong-auth"],
+    ]))).status).toBe(403);
+    expect((await SELF.fetch(callbackWithParameters(ringPath, [
+      ["Event", "Ring"], ["CallUUID", PROVIDER_ID], ["auth_id", "test-auth"],
+      ["auth_id", "test-auth"],
+    ]))).status).toBe(403);
+    expect((await SELF.fetch(callbackWithParameters(ringPath, [
+      ["Event", "Ring"], ["Event", "StartApp"], ["CallUUID", PROVIDER_ID],
+    ]))).status).toBe(400);
+    expect((await SELF.fetch(callbackWithParameters(ringPath, [
+      ["Event", "Ring"], ["RequestUUID", PROVIDER_ID], ["CallUUID", crypto.randomUUID()],
+    ]))).status).toBe(403);
+    expect((await SELF.fetch(callbackWithParameters(ringPath, [
+      ["Event", "Ring"], ["RequestUUID", PROVIDER_ID], ["Direction", "inbound"],
+    ]))).status).toBe(403);
     const tampered = await signedCallback(answerPath, "StartApp", "12345678901234567892");
     tampered.headers.set("x-vobiz-signature-v3", btoa("invalid"));
     expect((await SELF.fetch(tampered)).status).toBe(403);
+    expect((await SELF.fetch(await signedCallback(
+      ringPath, "Ring", "12345678901234567893",
+    ))).status).toBe(200);
     const answered = await handleVobizCallback(
-      await signedCallback(answerPath, "StartApp", "12345678901234567890", false),
+      callbackWithParameters(answerPath, [
+        ["Event", "StartApp"], ["RequestUUID", PROVIDER_ID], ["Direction", "outbound"],
+        ["From", DID], ["To", DESTINATION],
+      ]),
       { ...env, VOBIZ_OUTBOUND_ENABLED: "false" }, "answer", call.id, callbackToken, fakeFetch,
     );
     expect(answered.status).toBe(200);
@@ -235,6 +274,197 @@ describe("isolated Vobiz outbound relay", () => {
     expect(answered.status).toBe(200);
     expect(await answered.text()).toContain("<Hangup/>");
     expect((await (await getPstnCall(env, call.id)).json()).status).toBe("failed");
+  });
+
+  it("reads only the queued, live, or CDR state for an existing local call", async () => {
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+    const { id } = await placed.json();
+    const endpoint = `https://relay.example/v1/pstn-calls/${id}/provider-status`;
+    expect((await SELF.fetch(endpoint)).status).toBe(401);
+    expect((await SELF.fetch(endpoint, { headers: { authorization: "Bearer wrong" } })).status).toBe(401);
+    expect((await SELF.fetch(`${endpoint}?status=live`, {
+      headers: { authorization: `Bearer ${AGENT}` },
+    })).status).toBe(400);
+    expect((await SELF.fetch(`https://relay.example/v1/pstn-calls/${crypto.randomUUID()}/provider-status`, {
+      headers: { authorization: `Bearer ${AGENT}` },
+    })).status).toBe(404);
+
+    const before = await env.DB.prepare(
+      "SELECT status, provider_status, updated_at, ended_at FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(id).first();
+    const probed = [];
+    const providerFetch = (answers) => async (input, init) => {
+      const url = new URL(input);
+      probed.push(url.toString());
+      expect(init.method).toBe("GET");
+      expect(init.redirect).toBe("manual");
+      expect(init.headers["x-auth-id"]).toBe(env.VOBIZ_AUTH_ID);
+      expect(init.headers["x-auth-token"]).toBe(env.VOBIZ_AUTH_TOKEN);
+      expect(url.origin).toBe("https://api.vobiz.ai");
+      expect(url.pathname).toContain(PROVIDER_ID);
+      return answers.shift();
+    };
+    const queued = await getPstnProviderStatus(env, id, providerFetch([
+      Response.json({ call_uuid: PROVIDER_ID, call_status: "queued", from: DID, to: DESTINATION }),
+    ]));
+    expect(await queued.json()).toEqual({ call_id: id, provider: { source: "queued", state: "queued" } });
+    expect(probed.at(-1)).toContain("?status=queued");
+
+    probed.length = 0;
+    const live = await getPstnProviderStatus(env, id, providerFetch([
+      new Response(null, { status: 404 }),
+      Response.json({ call_uuid: PROVIDER_ID, call_status: "in-progress", from: DID, to: DESTINATION }),
+    ]));
+    expect(await live.json()).toEqual({ call_id: id, provider: { source: "live", state: "in-progress" } });
+    expect(probed.map((url) => new URL(url).search)).toEqual(["?status=queued", "?status=live"]);
+
+    probed.length = 0;
+    const cdr = await getPstnProviderStatus(env, id, providerFetch([
+      new Response(null, { status: 404 }), new Response(null, { status: 404 }),
+      Response.json({ data: { uuid: PROVIDER_ID, hangup_cause: "NO_ANSWER",
+        hangup_cause_code: 6010, failure_code: "NO_ANSWER",
+        ring_time: 0, answer_time: null, duration: 6, billsec: 0,
+        hangup_source: "Caller", hangup_disposition: "send_bye",
+        failure_reason: "Subscriber private text", start_time: "2026-09-29T15:00:00Z",
+        caller_id_number: DID, destination_number: DESTINATION } }),
+    ]));
+    expect(await cdr.json()).toEqual({ call_id: id, provider: { source: "cdr", state: "ended",
+      hangup_cause: "NO_ANSWER", hangup_cause_code: "6010", failure_code: "NO_ANSWER",
+      ring_time_seconds: 0, answer_time_present: false, duration: 6, billsec: 0,
+      hangup_source: "Caller", hangup_disposition: "send_bye" } });
+    expect(probed.map((url) => new URL(url).pathname.includes("/Call/") ? "Call" : "cdr"))
+      .toEqual(["Call", "Call", "cdr"]);
+    expect(await env.DB.prepare(
+      "SELECT status, provider_status, updated_at, ended_at FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(id).first()).toEqual(before);
+
+    const answered = await getPstnProviderStatus(env, id, providerFetch([
+      new Response(null, { status: 404 }), new Response(null, { status: 404 }),
+      Response.json({ uuid: PROVIDER_ID, ring_time: 5, answer_time: "2026-09-29T15:00:05Z",
+        duration: 12, billsec: 7, hangup_cause: "NORMAL_CLEARING",
+        hangup_source: "Callee", hangup_disposition: "recv_bye",
+        caller_id_number: DID, destination_number: DESTINATION }),
+    ]));
+    expect(await answered.json()).toEqual({ call_id: id, provider: { source: "cdr", state: "ended",
+      hangup_cause: "NORMAL_CLEARING", hangup_cause_code: null, failure_code: null,
+      ring_time_seconds: 5, answer_time_present: true, duration: 12, billsec: 7,
+      hangup_source: "Callee", hangup_disposition: "recv_bye" } });
+  });
+
+  it("keeps provider errors, oversized bodies, and mismatched UUIDs opaque", async () => {
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+    const { id } = await placed.json();
+    const failed = await getPstnProviderStatus(env, id, async () =>
+      new Response("private provider failure with a phone number", { status: 403 }));
+    expect(await failed.json()).toEqual({ error: "provider_lookup_failed", provider_http_status: 403 });
+    const mismatched = await getPstnProviderStatus(env, id, async () =>
+      Response.json({ call_uuid: crypto.randomUUID(), call_status: "queued", to: DESTINATION }));
+    expect(await mismatched.json()).toEqual({ error: "provider_response_invalid" });
+    const invalidMetrics = await getPstnProviderStatus(env, id, async (input) =>
+      new URL(input).search ? new Response(null, { status: 404 }) :
+        Response.json({ uuid: PROVIDER_ID, hangup_cause: "NORMAL_CLEARING",
+          ring_time: null, answer_time: "", duration: -1, billsec: 100_000,
+          hangup_source: "free-form private text", hangup_disposition: "unexpected" }));
+    expect(await invalidMetrics.json()).toEqual({ call_id: id, provider: { source: "cdr", state: "ended",
+      hangup_cause: "NORMAL_CLEARING", hangup_cause_code: null, failure_code: null,
+      answer_time_present: false,
+      hangup_source: null, hangup_disposition: null } });
+    const oversized = await getPstnProviderStatus(env, id, async () =>
+      Response.json({ call_uuid: PROVIDER_ID, call_status: "queued", padding: "x".repeat(17_000) }));
+    expect(await oversized.json()).toEqual({ error: "provider_lookup_unavailable" });
+    const notFound = await getPstnProviderStatus(env, id, async () => new Response(null, { status: 404 }));
+    expect(await notFound.json()).toEqual({ error: "provider_record_not_found" });
+    await env.DB.prepare("UPDATE vobiz_pstn_calls SET vobiz_call_uuid = NULL WHERE id = ?1").bind(id).run();
+    const noUUID = await getPstnProviderStatus(env, id, async () => {
+      throw new Error("provider must not be queried without a stored UUID");
+    });
+    expect(await noUUID.json()).toEqual({ error: "provider_call_id_unavailable" });
+  });
+
+  it("reconciles only a final CDR and is idempotent", async () => {
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+    const { id } = await placed.json();
+    const endpoint = `https://relay.example/v1/pstn-calls/${id}/reconcile`;
+    expect((await SELF.fetch(endpoint, { method: "POST" })).status).toBe(401);
+    expect((await SELF.fetch(`${endpoint}?force=true`, { method: "POST",
+      headers: { authorization: `Bearer ${AGENT}` } })).status).toBe(400);
+    expect((await SELF.fetch(`https://relay.example/v1/pstn-calls/${crypto.randomUUID()}/reconcile`, {
+      method: "POST", headers: { authorization: `Bearer ${AGENT}` },
+    })).status).toBe(404);
+
+    const before = await env.DB.prepare(
+      "SELECT status, provider_status, updated_at, ended_at FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(id).first();
+    const providerFetch = (source) => async (input) => {
+      const url = new URL(input);
+      if (url.searchParams.get("status") === "queued") {
+        return source === "queued"
+          ? Response.json({ call_uuid: PROVIDER_ID, call_status: "queued" })
+          : new Response(null, { status: 404 });
+      }
+      if (url.searchParams.get("status") === "live") {
+        return source === "live"
+          ? Response.json({ call_uuid: PROVIDER_ID, call_status: "in-progress" })
+          : new Response(null, { status: 404 });
+      }
+      return Response.json({ uuid: PROVIDER_ID, hangup_cause: "NORMAL_CLEARING",
+        ring_time: 0, answer_time: null, duration: 2, billsec: 0,
+        destination_number: DESTINATION });
+    };
+    for (const source of ["queued", "live"]) {
+      const response = await reconcilePstnCall(env, id, providerFetch(source));
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: "provider_call_not_final",
+        provider: { source }, call: { id, status: "queued" } });
+      expect(await env.DB.prepare(
+        "SELECT status, provider_status, updated_at, ended_at FROM vobiz_pstn_calls WHERE id = ?1",
+      ).bind(id).first()).toEqual(before);
+    }
+
+    const completed = await reconcilePstnCall(env, id, providerFetch("cdr"));
+    expect(completed.status).toBe(200);
+    expect(await completed.json()).toMatchObject({ id, status: "failed",
+      provider_status: "provider_ended_without_callback" });
+    const after = await env.DB.prepare(
+      "SELECT status, provider_status, updated_at, ended_at FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(id).first();
+    expect(after.ended_at).toEqual(expect.any(Number));
+    const repeated = await reconcilePstnCall(env, id, async () => {
+      throw new Error("a reconciled call must not be probed again");
+    });
+    expect(await repeated.json()).toMatchObject({ id, status: "failed",
+      provider_status: "provider_ended_without_callback" });
+    expect(await env.DB.prepare(
+      "SELECT status, provider_status, updated_at, ended_at FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(id).first()).toEqual(after);
+    expect((await SELF.fetch(endpoint, { method: "POST",
+      headers: { authorization: `Bearer ${AGENT}` },
+    })).status).toBe(200);
+  });
+
+  it.each([
+    ["connected callback", "UPDATE vobiz_pstn_calls SET status = 'connected' WHERE id = ?1", "connected"],
+    ["bridge claim", "UPDATE vobiz_pstn_calls SET bridge_claimed_at = 123 WHERE id = ?1", "queued"],
+    ["terminal callback", "UPDATE vobiz_pstn_calls SET status = 'failed', ended_at = 123 WHERE id = ?1", "failed"],
+  ])("preserves a %s racing with CDR reconciliation", async (_, update, expectedStatus) => {
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+    const { id } = await placed.json();
+    const response = await reconcilePstnCall(env, id, async (input) => {
+      const url = new URL(input);
+      if (url.search) return new Response(null, { status: 404 });
+      await env.DB.prepare(update).bind(id).run();
+      return Response.json({ uuid: PROVIDER_ID, hangup_cause: "NORMAL_CLEARING", billsec: 0 });
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ id, status: expectedStatus,
+      provider_status: "accepted" });
+    const row = await env.DB.prepare(
+      "SELECT status, provider_status, bridge_claimed_at, ended_at FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(id).first();
+    expect(row.status).toBe(expectedStatus);
+    expect(row.provider_status).toBe("accepted");
+    if (expectedStatus === "queued") expect(row.bridge_claimed_at).toBe(123);
+    if (expectedStatus === "failed") expect(row.ended_at).toBe(123);
   });
 
   it("stores a bounded custom AI-disclosed opening and includes it in idempotency", async () => {

@@ -5,6 +5,7 @@
   "compatibility_date": "2026-09-29",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  "routes": [{ "pattern": "vobiz.forgeme.xyz", "custom_domain": true }],
   "vars": {
     "VOBIZ_INBOUND_ENABLED": "false"
   },
