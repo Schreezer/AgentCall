@@ -10,7 +10,7 @@ final class ConnectionTone {
         do {
             let player = try AVAudioPlayer(data: Self.toneData())
             player.numberOfLoops = -1
-            player.volume = 0.28
+            player.volume = 0.62
             guard player.prepareToPlay(), player.play() else { return }
             self.player = player
         } catch {
@@ -19,26 +19,40 @@ final class ConnectionTone {
     }
 
     func stop() {
-        player?.stop()
-        player = nil
+        guard let player else { return }
+        self.player = nil
+        guard player.isPlaying else { player.stop(); return }
+        player.setVolume(0, fadeDuration: 0.05)
+        Task { @MainActor [player] in
+            try? await Task.sleep(for: .milliseconds(60))
+            player.stop()
+        }
     }
 
-    private static func toneData() -> Data {
+    // A local connecting cue with the familiar two-burst ringback cadence.
+    // This is app audio; the phone network supplies its own ringback for PSTN calls.
+    static func toneData() -> Data {
         let sampleRate: UInt32 = 48_000
         let channelCount: UInt16 = 1
         let bitsPerSample: UInt16 = 16
-        let duration = 1.1
+        let duration = 3.0
         let sampleCount = Int(Double(sampleRate) * duration)
-        let toneSamples = Int(Double(sampleRate) * 0.14)
-        let fadeSamples = Int(Double(sampleRate) * 0.02)
+        let bursts: [(start: Double, end: Double)] = [(0, 0.4), (0.6, 1.0)]
+        let fadeDuration = 0.012
         var samples = [Int16](repeating: 0, count: sampleCount)
 
-        for index in 0..<toneSamples {
-            let fadeIn = min(1, Double(index) / Double(fadeSamples))
-            let fadeOut = min(1, Double(toneSamples - index) / Double(fadeSamples))
-            let envelope = min(fadeIn, fadeOut)
-            let phase = 2 * Double.pi * 440 * Double(index) / Double(sampleRate)
-            samples[index] = Int16(sin(phase) * envelope * 0.16 * Double(Int16.max))
+        for burst in bursts {
+            let start = Int(burst.start * Double(sampleRate))
+            let end = Int(burst.end * Double(sampleRate))
+            for index in start..<end {
+                let time = Double(index) / Double(sampleRate)
+                let fadeIn = min(1, (time - burst.start) / fadeDuration)
+                let fadeOut = min(1, (burst.end - time) / fadeDuration)
+                let envelope = min(fadeIn, fadeOut)
+                // The 400 Hz tone is deliberately clear at receiver volume.
+                let sample = sin(2 * Double.pi * 400 * time) * envelope * 0.38
+                samples[index] = Int16(sample * Double(Int16.max))
+            }
         }
 
         let byteRate = sampleRate * UInt32(channelCount) * UInt32(bitsPerSample / 8)

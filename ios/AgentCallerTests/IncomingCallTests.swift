@@ -66,6 +66,28 @@ final class IncomingCallTests: XCTestCase {
         XCTAssertFalse(CallAudioRoutePolicy.options.contains(.defaultToSpeaker))
     }
 
+    @MainActor
+    func testConnectingCueHasTwoAudibleBurstsAndAQuietPause() {
+        let wav = ConnectionTone.toneData()
+        let sampleRate = 48_000
+        XCTAssertEqual(wav.count, 44 + sampleRate * 3 * 2)
+
+        func peak(from start: Double, to end: Double) -> Int {
+            let first = Int(start * Double(sampleRate))
+            let last = Int(end * Double(sampleRate))
+            return (first..<last).reduce(0) { maximum, sample in
+                let offset = 44 + sample * 2
+                let bits = UInt16(wav[offset]) | (UInt16(wav[offset + 1]) << 8)
+                return max(maximum, abs(Int(Int16(bitPattern: bits))))
+            }
+        }
+
+        XCTAssertGreaterThan(peak(from: 0.05, to: 0.35), 8_000)
+        XCTAssertEqual(peak(from: 0.45, to: 0.55), 0)
+        XCTAssertGreaterThan(peak(from: 0.65, to: 0.95), 8_000)
+        XCTAssertEqual(peak(from: 1.1, to: 2.9), 0)
+    }
+
     func testReceiverAndSpeakerChangesPreserveTheSystemSelectedMicrophone() {
         XCTAssertEqual(
             CallAudioRouteOption.Kind.speaker.commands,
