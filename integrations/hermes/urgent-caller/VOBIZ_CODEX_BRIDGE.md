@@ -16,8 +16,9 @@ implemented behind `VOBIZ_BRIDGE_ALLOW_INBOUND=false`; the isolated Worker has
 its own disabled inbound switch. The purchased DID remains unattached and Jio
 forwarding remains unconfigured until live readiness is verified. The bridge
 admits one call at a time.
-It holds audio only in short memory buffers; it does not save audio. It sends a
-bounded, numeric-code-redacted transcript to the isolated Worker at call end.
+It holds audio only in short memory buffers; it does not save audio. Inbound
+calls send a bounded, digit-redacted report to the isolated Worker at call end.
+The bridge never writes the full transcript to its recovery spool.
 
 ## Runtime
 
@@ -41,7 +42,8 @@ Required service environment:
 | `VOBIZ_CODEX_ENTRY_REL` | CLI entry path relative to that package root, such as `bin/codex.js` |
 | `VOBIZ_NODE_BINARY` | Absolute path to the Node.js executable used by the CLI |
 | `VOBIZ_BRIDGE_ALLOW_INBOUND` | Explicit inbound opt-in; defaults to `false` |
-| `CALLER_RELAY_URL`, `CALLER_AGENT_TOKEN` | Optional paired Caller relay origin and agent token for a low-detail iPhone alert after a completed inbound call; set both or neither |
+| `VOBIZ_BRIDGE_SPOOL_DIR` | Optional absolute path for durable inbound terminal reports; defaults to `/home/chirag/.local/state/caller-vobiz-bridge/terminal-events` on DebianBat |
+| `CALLER_RELAY_URL`, `CALLER_AGENT_TOKEN` | Optional paired Caller relay origin and agent token for a short iPhone message after a completed inbound call; set both or neither |
 
 Resolve the DebianBat paths from `readlink -f` on the installed Codex and Node
 executables, then point `VOBIZ_CODEX_PACKAGE_ROOT` at the narrow CLI package
@@ -77,13 +79,35 @@ Both relay URL settings must be exact origins. HTTPS is required off-machine;
 plain HTTP is accepted only for numeric loopback addresses. Credentials, paths,
 queries, and fragments are rejected before the bridge starts.
 
+Before an inbound `ended` event is sent, the bridge atomically writes only its
+maximum 500-character redacted caller report to a dedicated mode-0700 spool
+directory as a mode-0600 file. The spool is limited to 256 events of at most
+4 KiB each. A directory with weaker permissions prevents startup; a full spool
+prevents another inbound report from being silently discarded. After an outage,
+the bridge retries stored events at startup and every 30 seconds, even if
+Caller notification credentials are absent or inbound answering has been
+temporarily disabled. It removes a file only after the Worker accepts the
+event with HTTP 200 or 202. A duplicate attempt uses the original stored
+report and the same per-call event idempotency key. The service needs a writable
+state directory that persists across restarts; `/tmp` and `PrivateTmp` are not
+suitable for this spool.
+
 For inbound calls, the Vobiz Worker owns the durable notification outbox. Once
 the ended event is stored, the bridge claims due alerts at startup, every 30
-seconds, and immediately after a completed inbound call. It sends only the fixed
-generic message to Caller, with `vobiz-inbound-{call-id}` as the Caller relay
-idempotency key, then acknowledges the Worker item. A process or network failure
-leaves the item pending for a later retry. Caller credentials are optional; when
-they are absent, the bridge does not claim anything and pending items stay in D1.
+seconds, and immediately after a completed inbound call. The Worker supplies
+either a short `Caller said (unverified): …` excerpt derived from the stored
+inbound report or a generic fallback when no meaningful reason was captured.
+The bridge accepts only that bounded, single-line, digit-free message or the
+fixed fallback, then sends it to Caller with `vobiz-inbound-{call-id}` as the
+relay idempotency key. It acknowledges the Worker item only after relay
+acceptance. The alert contains neither the full transcript nor the caller's
+number; the excerpt is unverified caller speech, not a verified reason or an
+instruction to Hermes. It is an excerpt, not a semantic summary. A process or
+network failure leaves the item pending for a later retry. Caller credentials
+are optional; when they are absent, the bridge does not claim anything and
+pending items stay in D1. A malformed claimed item or a permanent Caller relay
+400, 409, or 422 response is marked failed in the Worker so it cannot block
+later alerts; authentication failures and transient errors remain pending.
 Worker `owner_notification_status=sent` means Caller accepted or queued the alert;
 it does not prove APNs delivery or that the iPhone displayed it.
 
@@ -214,13 +238,16 @@ Jio call cannot be distinguished from a direct DID call using caller ID alone,
 so both use the same message-taking policy.
 
 The bridge reports `connected`, `ended`, or `failed` to
-`POST /v1/vobiz/bridge/calls/{id}/events`. `ended` includes up to 20 transcript
-turns (400 characters each). For inbound calls it also includes a maximum
-500-character `inbound_report` made from the caller's own words, with long
-numeric strings redacted. This is evidence of what was heard, not a claim that
+`POST /v1/vobiz/bridge/calls/{id}/events`. Outbound `ended` includes up to 20
+transcript turns (400 characters each). Inbound `ended` instead includes a
+maximum 500-character `inbound_report` made from the caller's own words, with
+digits redacted, plus a bounded summary copied from that report. This is
+evidence of what was heard, not a semantic interpretation or a claim that
 the message was delivered or acknowledged. Unknown callers get no Hermes
 tools or private context. Inbound callers hear a fixed greeting that identifies
-the speaker as Chirag's AI assistant and offers to take a message. Caller ID
+the speaker as Chirag's AI assistant and offers to take a message. The agent
+asks why the person called and records a brief message; it accepts a name if
+volunteered without asking for additional personal details. Caller ID
 is unverified; the assistant must not claim Chirag is busy or available, promise
 a callback, disclose private information, or take actions requested by callers.
 After the fixed English opening, the assistant is instructed to continue in
@@ -233,10 +260,11 @@ must include the languages Chirag expects to receive.
 If the optional Caller relay URL and token are present, a completed inbound
 call queues one durable outbox item. The bridge delivers one idempotent
 `message` mode alert through the paired Caller app and acknowledges the item
-only after Caller accepts it. Its text only says Hermes answered an incoming
-call; it contains no caller number or transcript, so lock-screen previews
-remain low detail. Relay acceptance does not prove the iPhone displayed the
-alert.
+only after Caller accepts it. Its text is a short, digit-free excerpt labeled
+as unverified caller speech, or a generic fallback if no useful reason was
+captured. It contains no caller number or full transcript. The excerpt may be
+visible in lock-screen previews. Relay acceptance does not prove the iPhone
+displayed the alert.
 
 ### Model verification
 

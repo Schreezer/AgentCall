@@ -4,6 +4,9 @@ const MAX_CALL_MS = 3 * 60_000;
 const MAX_OPENING_SPEECH_CHARS = 320;
 const NOTIFICATION_CLAIM_DELAY_MS = 30_000;
 const NOTIFICATION_MESSAGE = "Hermes answered an incoming call. Ask Hermes for the call result.";
+const INBOUND_REPORT_PREFIX = "Caller said: ";
+const NOTIFICATION_REPORT_PREFIX = "Caller said (unverified): ";
+const NOTIFICATION_MAX_CHARS = 180;
 const OUTBOUND_OPENING = "Hello, I'm Chirag's AI assistant, calling on his behalf. Is this a good time?";
 const INBOUND_OPENING = "Hello, I'm Chirag's AI assistant. May I take a message for him?";
 const INBOUND_INSTRUCTIONS = "Answer as Chirag's AI assistant, identify yourself as AI, and take a message for Chirag. Do not claim to be Chirag, verify a caller's identity from caller ID, or disclose private information.";
@@ -341,7 +344,9 @@ export async function getPstnCall(env, callID) {
 
 export async function listInboundCalls(env) {
   const result = await env.DB.prepare(
-    `SELECT calls.*, notifications.status AS owner_notification_status
+    `SELECT calls.*,
+            CASE WHEN notifications.quarantined_at IS NOT NULL THEN 'failed'
+              ELSE notifications.status END AS owner_notification_status
        FROM vobiz_inbound_calls AS calls
        LEFT JOIN vobiz_caller_notification_outbox AS notifications
          ON notifications.call_id = calls.id
@@ -353,7 +358,9 @@ export async function listInboundCalls(env) {
 export async function getInboundCall(env, callID) {
   if (!isUUID(callID)) return json(404, { error: "call_not_found" });
   const row = await env.DB.prepare(
-    `SELECT calls.*, notifications.status AS owner_notification_status
+    `SELECT calls.*,
+            CASE WHEN notifications.quarantined_at IS NOT NULL THEN 'failed'
+              ELSE notifications.status END AS owner_notification_status
        FROM vobiz_inbound_calls AS calls
        LEFT JOIN vobiz_caller_notification_outbox AS notifications
          ON notifications.call_id = calls.id
@@ -706,9 +713,47 @@ export async function claimBridgeCall(env, callID) {
     : json(409, { error: "call_already_claimed_or_unavailable" });
 }
 
+function truncateUnicode(value, maxChars) {
+  let result = "";
+  let characterCount = 0;
+  for (const { segment } of new Intl.Segmenter("und", { granularity: "grapheme" }).segment(value)) {
+    const segmentLength = [...segment].length;
+    if (characterCount + segmentLength > maxChars) break;
+    result += segment;
+    characterCount += segmentLength;
+  }
+  return result.trim();
+}
+
 function cleanSummary(value) {
-  const cleaned = String(value || "").replace(/(?<!\d)\d{4,8}(?!\d)/g, "[code omitted]").trim();
-  return cleaned.slice(0, 1_000) || null;
+  const normalized = String(value || "").normalize("NFC")
+    .replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu, " ")
+    .replace(/\s+/gu, " ").trim();
+  const redacted = normalized.replace(/\+?\p{N}(?:[\p{N}\s().,/\p{Pd}]*\p{N})?/gu,
+    (sequence) => {
+      const digits = [...sequence.matchAll(/\p{N}/gu)].length;
+      if (digits < 4) return sequence;
+      return digits <= 8 ? "[code omitted]" : "[number omitted]";
+    });
+  return truncateUnicode(redacted, 1_000) || null;
+}
+
+function callerNotificationMessage(report) {
+  if (typeof report !== "string" || !report.startsWith(INBOUND_REPORT_PREFIX)) {
+    return NOTIFICATION_MESSAGE;
+  }
+  const speech = report.slice(INBOUND_REPORT_PREFIX.length).normalize("NFC")
+    .replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu, " ")
+    .replace(/\p{N}+/gu, "[number omitted]")
+    .replace(/\s+/gu, " ").trim();
+  const substantiveSpeech = speech.replace(/\[(?:number|code) omitted\]/gu, "");
+  if (!/\p{L}/u.test(substantiveSpeech)) {
+    return NOTIFICATION_MESSAGE;
+  }
+
+  const maxExcerptChars = NOTIFICATION_MAX_CHARS - [...NOTIFICATION_REPORT_PREFIX].length;
+  const excerpt = truncateUnicode(speech, maxExcerptChars);
+  return excerpt ? `${NOTIFICATION_REPORT_PREFIX}${excerpt}` : NOTIFICATION_MESSAGE;
 }
 
 export async function bridgeCallEvent(request, env, callID) {
@@ -745,7 +790,7 @@ export async function bridgeCallEvent(request, env, callID) {
     }
     const reportText = body.event === "ended" && typeof body.inbound_report === "string"
       ? cleanSummary(body.inbound_report) : null;
-    const report = reportText?.slice(0, 500) || null;
+    const report = reportText ? truncateUnicode(reportText, 500) : null;
     const update = env.DB.prepare(
       `UPDATE vobiz_inbound_calls
           SET status = CASE
@@ -758,7 +803,9 @@ export async function bridgeCallEvent(request, env, callID) {
                 WHEN ?3 IN ('ended', 'failed') THEN ?3 ELSE NULL END,
               bridge_connected_at = CASE WHEN ?3 = 'connected' AND ended_at IS NULL
                 THEN COALESCE(bridge_connected_at, ?6) ELSE bridge_connected_at END,
-              summary = COALESCE(?4, summary), inbound_report = COALESCE(?5, inbound_report),
+              summary = COALESCE(?4, summary),
+              inbound_report = CASE WHEN bridge_terminal_event IS NULL
+                THEN COALESCE(?5, inbound_report) ELSE inbound_report END,
               updated_at = ?6,
               ended_at = CASE WHEN ?2 IN ('completed', 'failed')
                 THEN COALESCE(ended_at, ?6) ELSE ended_at END
@@ -767,12 +814,12 @@ export async function bridgeCallEvent(request, env, callID) {
     if (body.event === "ended") {
       const queue = env.DB.prepare(
         `INSERT INTO vobiz_caller_notification_outbox
-           (call_id, status, attempt_count, next_attempt_at, created_at, updated_at)
-         SELECT id, 'pending', 0, ?2, ?2, ?2
+           (call_id, status, attempt_count, next_attempt_at, created_at, updated_at, message)
+         SELECT id, 'pending', 0, ?2, ?2, ?2, ?3
            FROM vobiz_inbound_calls
           WHERE id = ?1 AND status = 'completed' AND bridge_terminal_event = 'ended'
          ON CONFLICT(call_id) DO NOTHING`,
-      ).bind(row.id, now);
+      ).bind(row.id, now, callerNotificationMessage(report));
       await env.DB.batch([update, queue]);
     } else {
       await update.run();
@@ -799,17 +846,17 @@ export async function claimCallerNotification(env) {
             updated_at = ?1
       WHERE call_id = (
         SELECT call_id FROM vobiz_caller_notification_outbox
-         WHERE status = 'pending' AND next_attempt_at <= ?1
+         WHERE status = 'pending' AND quarantined_at IS NULL AND next_attempt_at <= ?1
          ORDER BY created_at ASC LIMIT 1
-      ) AND status = 'pending' AND next_attempt_at <= ?1
-      RETURNING call_id, attempt_count`,
+      ) AND status = 'pending' AND quarantined_at IS NULL AND next_attempt_at <= ?1
+      RETURNING call_id, attempt_count, message`,
   ).bind(now, NOTIFICATION_CLAIM_DELAY_MS).first();
   if (!row) return json(200, { notification: null });
   return json(200, { notification: {
     call_id: row.call_id,
     idempotency_key: `vobiz-inbound-${row.call_id}`,
     caller_name: "Hermes",
-    message: NOTIFICATION_MESSAGE,
+    message: row.message,
     attempt: row.attempt_count,
   } });
 }
@@ -820,15 +867,50 @@ export async function acknowledgeCallerNotification(env, callID) {
   const changed = await env.DB.prepare(
     `UPDATE vobiz_caller_notification_outbox
         SET status = 'sent', sent_at = COALESCE(sent_at, ?2), updated_at = ?2
-      WHERE call_id = ?1 AND status = 'pending'`,
+      WHERE call_id = ?1 AND status = 'pending' AND quarantined_at IS NULL`,
   ).bind(callID.toLowerCase(), now).run();
   if (changed.meta.changes) return json(200, { ok: true });
   const prior = await env.DB.prepare(
-    "SELECT status FROM vobiz_caller_notification_outbox WHERE call_id = ?1",
+    "SELECT status, quarantined_at FROM vobiz_caller_notification_outbox WHERE call_id = ?1",
   ).bind(callID.toLowerCase()).first();
   return prior?.status === "sent"
     ? json(200, { ok: true })
-    : json(404, { error: "notification_not_found" });
+    : prior?.quarantined_at != null
+      ? json(409, { error: "notification_quarantined" })
+      : json(404, { error: "notification_not_found" });
+}
+
+export async function rejectCallerNotification(request, env, callID) {
+  if (!isUUID(callID)) return json(404, { error: "notification_not_found" });
+  let body;
+  try {
+    body = JSON.parse(await boundedText(request, 256));
+  } catch {
+    return json(400, { error: "invalid_rejection" });
+  }
+  const allowedReasons = new Set([
+    "invalid_claim", "caller_relay_rejected", "caller_relay_conflict",
+  ]);
+  if (!body || typeof body !== "object" || Array.isArray(body) ||
+      Object.keys(body).length !== 1 || !allowedReasons.has(body.reason)) {
+    return json(400, { error: "invalid_rejection" });
+  }
+  const id = callID.toLowerCase();
+  const now = Date.now();
+  const changed = await env.DB.prepare(
+    `UPDATE vobiz_caller_notification_outbox
+        SET quarantined_at = ?2, quarantine_reason = ?3, updated_at = ?2
+      WHERE call_id = ?1 AND status = 'pending' AND quarantined_at IS NULL
+        AND attempt_count > 0`,
+  ).bind(id, now, body.reason).run();
+  if (changed.meta.changes) return json(200, { ok: true });
+  const prior = await env.DB.prepare(
+    "SELECT status, quarantined_at, attempt_count FROM vobiz_caller_notification_outbox WHERE call_id = ?1",
+  ).bind(id).first();
+  if (!prior) return json(404, { error: "notification_not_found" });
+  if (prior.quarantined_at != null) return json(200, { ok: true });
+  return json(409, { error: prior.status === "sent"
+    ? "notification_already_sent" : "notification_not_claimed" });
 }
 
 async function allowOutbound(env) {
@@ -861,7 +943,9 @@ const worker = {
       if (request.method === "GET" && url.pathname === "/health") {
         await env.DB.prepare("SELECT id FROM vobiz_pstn_calls LIMIT 1").first();
         await env.DB.prepare("SELECT id FROM vobiz_inbound_calls LIMIT 1").first();
-        await env.DB.prepare("SELECT call_id FROM vobiz_caller_notification_outbox LIMIT 1").first();
+        await env.DB.prepare(
+          "SELECT call_id, message, quarantined_at, quarantine_reason FROM vobiz_caller_notification_outbox LIMIT 1",
+        ).first();
         return json(200, { ok: true, service: "caller-vobiz-outbound", storage_ready: true });
       }
 
@@ -921,6 +1005,15 @@ const worker = {
           return json(401, { error: "invalid_bridge_credential" });
         }
         return await acknowledgeCallerNotification(env, notificationAck[1]);
+      }
+      const notificationReject = url.pathname.match(
+        /^\/v1\/vobiz\/bridge\/notifications\/([0-9a-f-]+)\/reject$/i,
+      );
+      if (notificationReject && request.method === "POST") {
+        if (!(await validBearer(request, env.VOBIZ_BRIDGE_RELAY_TOKEN))) {
+          return json(401, { error: "invalid_bridge_credential" });
+        }
+        return await rejectCallerNotification(request, env, notificationReject[1]);
       }
       return json(404, { error: "not_found" });
     } catch (error) {
