@@ -97,6 +97,14 @@ export function validateCall(body, now = Date.now()) {
   };
 }
 
+export function callRequestFingerprintInput(body, input) {
+  return {
+    ...input,
+    // An immediate call's delivery time is chosen by the relay, not the caller.
+    scheduledAt: body.scheduled_at == null ? null : Date.parse(body.scheduled_at),
+  };
+}
+
 export function isUUID(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     value ?? "",

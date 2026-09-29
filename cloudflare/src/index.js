@@ -2,6 +2,7 @@ import {
   SUPPORTED_AUDIO_TYPES,
   audioObjectKey,
   bearerToken,
+  callRequestFingerprintInput,
   hashCredential,
   isUUID,
   json,
@@ -598,7 +599,8 @@ async function createCall(request, env, installation) {
   if (!validIdempotencyKey(idempotencyKey)) {
     return json(400, { error: "valid_idempotency_key_required" });
   }
-  const parsed = validateCall(await readJSON(request));
+  const body = await readJSON(request);
+  const parsed = validateCall(body);
   if (parsed.error) return json(400, { error: parsed.error });
   const input = parsed.value;
   if (input.audioID) {
@@ -615,7 +617,9 @@ async function createCall(request, env, installation) {
 
   const id = crypto.randomUUID();
   const now = Date.now();
-  const requestHash = await hashCredential(JSON.stringify(input));
+  const requestHash = await hashCredential(
+    JSON.stringify(callRequestFingerprintInput(body, input)),
+  );
   const inserted = await env.DB.prepare(
     `INSERT OR IGNORE INTO calls (
        id, installation_id, caller_name, message, audio_id, scheduled_at,
@@ -646,7 +650,17 @@ async function createCall(request, env, installation) {
     .first();
 
   if (!created && call.request_hash && call.request_hash !== requestHash) {
-    return json(409, { error: "idempotency_key_reused_with_different_call" });
+    // Calls created before this fix hashed the relay-selected time. Recognize
+    // an old immediate call without making a changed message or context match.
+    const legacyImmediateMatch = body.scheduled_at == null &&
+      call.scheduled_at <= call.created_at &&
+      call.request_hash === await hashCredential(JSON.stringify({
+        ...input,
+        scheduledAt: call.scheduled_at,
+      }));
+    if (!legacyImmediateMatch) {
+      return json(409, { error: "idempotency_key_reused_with_different_call" });
+    }
   }
 
   await notifyScheduler(

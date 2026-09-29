@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  callRequestFingerprintInput,
   normalizeAudioContentType,
   safeFilename,
   validIdempotencyKey,
@@ -56,6 +57,25 @@ test("normalizes a call and preserves its audio attachment", () => {
       originHermesSessionID: null,
     },
   });
+});
+
+test("fingerprints immediate calls without the relay-selected delivery time", () => {
+  const body = { message: " What did I eat? " };
+  const first = validateCall(body, Date.parse("2026-07-27T12:00:00Z")).value;
+  const retry = validateCall(body, Date.parse("2026-07-27T12:00:05Z")).value;
+  assert.notEqual(first.scheduledAt, retry.scheduledAt);
+  assert.deepEqual(
+    callRequestFingerprintInput(body, first),
+    callRequestFingerprintInput(body, retry),
+  );
+  assert.equal(callRequestFingerprintInput(body, first).scheduledAt, null);
+
+  const scheduledBody = { ...body, scheduled_at: "2026-07-27T12:01:00Z" };
+  const scheduled = validateCall(scheduledBody, Date.parse("2026-07-27T12:00:00Z")).value;
+  assert.equal(
+    callRequestFingerprintInput(scheduledBody, scheduled).scheduledAt,
+    Date.parse("2026-07-27T12:01:00Z"),
+  );
 });
 
 test("validates and normalizes a live Hermes voice call", () => {

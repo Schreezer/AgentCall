@@ -4,7 +4,7 @@ import {
   runInDurableObject,
 } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import { hashCredential } from "../src/core.js";
+import { hashCredential, validateCall } from "../src/core.js";
 import { URGENT_CALLER_RELEASE } from "../src/generated/urgent-caller-release.js";
 import { answerVoiceSession, createVoiceBootstrap } from "../src/voice-bootstrap.js";
 import { hermesPollDelay } from "../src/hermes-operation-workflow.js";
@@ -430,6 +430,122 @@ describe("Cloudflare relay", () => {
       token: pairing.body.agent_token,
     });
     expect(recovered.body.status).toBe("delivered");
+  });
+
+  it("deduplicates an immediate call after a delayed resend and rejects changed requests", async () => {
+    const registration = await requestJSON("/v1/installations", {
+      method: "POST",
+      body: {
+        token: "ef".repeat(32),
+        platform: "ios",
+        environment: "sandbox",
+      },
+    });
+    expect(registration.status).toBe(201);
+    const pairing = await requestJSON("/v1/pairings/claim", {
+      method: "POST",
+      body: { pairing_code: registration.body.pairing_code },
+    });
+    expect(pairing.status).toBe(200);
+
+    const immediateBody = { message: "Ask about dinner", caller_name: "Hermes" };
+    const immediateKey = "retry-immediate-call-01";
+    const first = await requestJSON("/v1/calls", {
+      method: "POST",
+      token: pairing.body.agent_token,
+      idempotencyKey: immediateKey,
+      body: immediateBody,
+    });
+    expect(first.status).toBe(202);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const retried = await requestJSON("/v1/calls", {
+      method: "POST",
+      token: pairing.body.agent_token,
+      idempotencyKey: immediateKey,
+      body: immediateBody,
+    });
+    expect(retried.status).toBe(200);
+    expect(retried.body.id).toBe(first.body.id);
+    const duplicateCount = await env.DB.prepare(
+      "SELECT COUNT(*) AS total FROM calls WHERE installation_id = ?1 AND idempotency_key = ?2",
+    ).bind(registration.body.installation_id, immediateKey).first();
+    expect(duplicateCount.total).toBe(1);
+
+    const changed = await requestJSON("/v1/calls", {
+      method: "POST",
+      token: pairing.body.agent_token,
+      idempotencyKey: immediateKey,
+      body: { ...immediateBody, message: "Ask about lunch" },
+    });
+    expect(changed.status).toBe(409);
+    expect(changed.body.error).toBe("idempotency_key_reused_with_different_call");
+
+    const scheduledBody = {
+      ...immediateBody,
+      scheduled_at: new Date(Date.now() + 60_000).toISOString(),
+    };
+    const scheduledKey = "retry-scheduled-call-01";
+    const scheduled = await requestJSON("/v1/calls", {
+      method: "POST",
+      token: pairing.body.agent_token,
+      idempotencyKey: scheduledKey,
+      body: scheduledBody,
+    });
+    expect(scheduled.status).toBe(202);
+    const scheduledRetry = await requestJSON("/v1/calls", {
+      method: "POST",
+      token: pairing.body.agent_token,
+      idempotencyKey: scheduledKey,
+      body: scheduledBody,
+    });
+    expect(scheduledRetry.status).toBe(200);
+    expect(scheduledRetry.body.id).toBe(scheduled.body.id);
+    const changedSchedule = await requestJSON("/v1/calls", {
+      method: "POST",
+      token: pairing.body.agent_token,
+      idempotencyKey: scheduledKey,
+      body: {
+        ...scheduledBody,
+        scheduled_at: new Date(Date.parse(scheduledBody.scheduled_at) + 1000).toISOString(),
+      },
+    });
+    expect(changedSchedule.status).toBe(409);
+
+    // Existing immediate rows used their assigned delivery time in the hash.
+    const legacyBody = { message: "A call created before the fingerprint fix" };
+    const legacyKey = "retry-legacy-immediate-01";
+    const legacyFirst = await requestJSON("/v1/calls", {
+      method: "POST",
+      token: pairing.body.agent_token,
+      idempotencyKey: legacyKey,
+      body: legacyBody,
+    });
+    expect(legacyFirst.status).toBe(202);
+    const legacyRow = await env.DB.prepare(
+      "SELECT scheduled_at FROM calls WHERE id = ?1",
+    ).bind(legacyFirst.body.id).first();
+    const oldHash = await hashCredential(JSON.stringify(
+      validateCall(legacyBody, legacyRow.scheduled_at).value,
+    ));
+    await env.DB.prepare("UPDATE calls SET request_hash = ?2 WHERE id = ?1")
+      .bind(legacyFirst.body.id, oldHash).run();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const legacyRetry = await requestJSON("/v1/calls", {
+      method: "POST",
+      token: pairing.body.agent_token,
+      idempotencyKey: legacyKey,
+      body: legacyBody,
+    });
+    expect(legacyRetry.status).toBe(200);
+    expect(legacyRetry.body.id).toBe(legacyFirst.body.id);
+    const changedLegacy = await requestJSON("/v1/calls", {
+      method: "POST",
+      token: pairing.body.agent_token,
+      idempotencyKey: legacyKey,
+      body: { message: "A changed call" },
+    });
+    expect(changedLegacy.status).toBe(409);
   });
 
   it("authenticates the stateless MCP endpoint and preserves operation scope", async () => {
