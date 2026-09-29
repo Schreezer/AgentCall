@@ -23,7 +23,7 @@ DEFAULT_CODEX_VOICE = "sol"
 CODEX_V3_VOICES = frozenset({
     "juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove",
 })
-MINIMUM_CODEX_VERSION = (0, 150, 1)
+MINIMUM_CODEX_VERSION = (0, 158, 0)
 
 
 def parse_env_file(path: pathlib.Path) -> dict[str, str]:

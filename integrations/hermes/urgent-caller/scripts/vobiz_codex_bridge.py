@@ -43,6 +43,7 @@ MAX_WS_MESSAGE = 80_000
 MAX_CALL_SECONDS = 180
 IDLE_CALL_SECONDS = 45
 MAX_TOKEN_SECONDS = 300
+CODEX_REASONING_MODEL = "gpt-6-sol"
 CALL_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$")
 STREAM_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$")
 OTP_PATTERN = re.compile(r"(?<!\d)\d{4,8}(?!\d)")
@@ -58,8 +59,36 @@ CALL_POLICY = (
     "for one-time codes, passwords, payment credentials, or sensitive personal "
     "information. Do not reveal the owner's private information. If the caller "
     "asks for an action outside the brief, take a message for the owner instead. "
-    "Speak naturally and concisely. You have no tools to act on the owner's behalf."
+    "Speak naturally and concisely. For each substantive recipient question or "
+    "request that needs reasoning, information, or drafting, delegate to the "
+    "Codex background_agent and wait for its answer before giving the answer "
+    "aloud. You may handle greetings and brief acknowledgements directly. "
+    "Do not mention the background agent to the recipient. Neither you nor "
+    "the background agent may take actions outside this phone conversation."
 )
+BACKING_AGENT_POLICY = (
+    "You are the text reasoning agent for one outbound phone conversation. "
+    "Stay within the approved call brief. Give only concise, speakable replies "
+    "for the voice assistant to say to the recipient. Do not use files, shell, "
+    "browser, network, subagents, tools, or private context. Never ask for "
+    "one-time codes, passwords, payment credentials, or sensitive personal "
+    "information. Do not claim to be the human owner."
+)
+
+
+def verified_sol_thread_id(started: dict) -> str:
+    """Reject a provider fallback or older App Server that omits model proof."""
+    thread = started.get("thread") if isinstance(started, dict) else None
+    if (
+        not isinstance(thread, dict)
+        or not isinstance(thread.get("id"), str)
+        or not thread["id"]
+        or thread.get("model") != CODEX_REASONING_MODEL
+        or started.get("model") != CODEX_REASONING_MODEL
+        or thread.get("modelProvider") != "openai"
+    ):
+        raise RuntimeError("codex_reasoning_model_unavailable")
+    return thread["id"]
 
 
 def disclosed_opening(value: str) -> str:
@@ -248,6 +277,9 @@ class CodexPSTNSession:
         workspace = pathlib.Path(DEFAULT_WORKSPACE)
         workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
         started = await self.app.request("thread/start", {
+            "model": CODEX_REASONING_MODEL,
+            "modelProvider": "openai",
+            "allowProviderModelFallback": False,
             "ephemeral": True,
             "cwd": str(workspace),
             "sandbox": "read-only",
@@ -255,10 +287,9 @@ class CodexPSTNSession:
             "environments": [],
             "selectedCapabilityRoots": [],
             "dynamicTools": [],
+            "developerInstructions": BACKING_AGENT_POLICY + "\n\nApproved call brief: " + self.context["instructions"],
         })
-        self.thread_id = (started.get("thread") or {}).get("id")
-        if not self.thread_id:
-            raise RuntimeError("codex_thread_start_failed")
+        self.thread_id = verified_sol_thread_id(started)
         self._unsubscribe = self.app.add_notification_listener(self._notification)
         peer = RTCPeerConnection()
         self.peer = peer

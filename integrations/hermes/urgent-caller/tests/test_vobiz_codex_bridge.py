@@ -5,11 +5,13 @@ import json
 import pathlib
 import sys
 import time
+import types
 import unittest
 
 
 sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "scripts"))
 import vobiz_codex_bridge as bridge  # noqa: E402
+from vobiz_codex_appserver import codex_version_supported  # noqa: E402
 
 
 SECRET = "test-secret" * 5
@@ -43,6 +45,60 @@ class VobizBridgeTests(unittest.TestCase):
         self.assertEqual(bridge.disclosed_opening(approved), approved)
         misleading = "I'm calling about your AI subscription. How are you?"
         self.assertTrue(bridge.disclosed_opening(misleading).startswith("Hello, I'm an AI assistant"))
+
+    def test_gpt6_sol_thread_must_be_exact_and_cannot_fall_back(self):
+        expected = {
+            "model": "gpt-6-sol",
+            "thread": {"id": "sol-thread", "model": "gpt-6-sol", "modelProvider": "openai"},
+        }
+        self.assertEqual(bridge.verified_sol_thread_id(expected), "sol-thread")
+        for changed in (
+            {**expected, "model": "gpt-6-luna"},
+            {**expected, "thread": {**expected["thread"], "model": "gpt-6-luna"}},
+            {**expected, "thread": {**expected["thread"], "modelProvider": "other"}},
+            {**expected, "thread": {**expected["thread"], "id": ""}},
+            {"thread": expected["thread"]},
+        ):
+            with self.subTest(changed=changed), self.assertRaisesRegex(
+                RuntimeError, "codex_reasoning_model_unavailable"
+            ):
+                bridge.verified_sol_thread_id(changed)
+        self.assertFalse(codex_version_supported("0.157.9"))
+        self.assertTrue(codex_version_supported("0.158.0"))
+
+    def test_call_pins_sol_before_media_and_fails_on_provider_fallback(self):
+        async def check():
+            from unittest import mock
+
+            class FallbackApp:
+                def __init__(self):
+                    self.calls = []
+
+                async def request(self, method, params):
+                    self.calls.append((method, params))
+                    return {
+                        "model": "gpt-6-luna",
+                        "thread": {"id": "fallback", "model": "gpt-6-luna", "modelProvider": "openai"},
+                    }
+
+            app = FallbackApp()
+            session = bridge.CodexPSTNSession(
+                app, None, "stream-test", {"instructions": "Greet the recipient."}, None
+            )
+            with mock.patch.dict(sys.modules, {
+                "aiortc": types.SimpleNamespace(RTCPeerConnection=None, RTCSessionDescription=None)
+            }), self.assertRaisesRegex(RuntimeError, "codex_reasoning_model_unavailable"):
+                await session.start()
+            self.assertEqual(len(app.calls), 1)
+            method, params = app.calls[0]
+            self.assertEqual(method, "thread/start")
+            self.assertEqual(params["model"], "gpt-6-sol")
+            self.assertEqual(params["modelProvider"], "openai")
+            self.assertIs(params["allowProviderModelFallback"], False)
+            self.assertIn("Greet the recipient.", params["developerInstructions"])
+
+        import asyncio
+        asyncio.run(check())
 
     def test_one_active_outbound_call_and_no_inbound_rollout(self):
         service = bridge.VobizCodexBridge(
