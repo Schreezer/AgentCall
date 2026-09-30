@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { SELF } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import worker, { createPstnCall, getPstnCall, getPstnProviderStatus,
+import worker, { bridgeActionToken, createPstnCall, getPstnCall, getPstnProviderStatus,
   handleVobizCallback, reconcilePstnCall } from "../src/index.js";
 
 const AGENT = "test-hermes-token-32-chars-long-value";
@@ -14,9 +14,14 @@ const requests = [];
 function fakeFetchFor(providerID = PROVIDER_ID) { return async (input, init) => {
   const url = new URL(input);
   requests.push({ url: url.toString(), method: init?.method || "GET",
-    payload: init?.body ? JSON.parse(init.body) : null });
+    payload: init?.body ? JSON.parse(init.body) : null,
+    authorization: init?.headers?.authorization, redirect: init?.redirect });
   if (url.toString() === "https://bridge.example/health") {
-    return Response.json({ ok: true, codex_ready: true });
+    return Response.json({ ok: true, codex_ready: true, runtime_ready: true });
+  }
+  if (/^\/(prepare|cancel)\/[0-9a-f-]+$/.test(url.pathname) && url.origin === "https://bridge.example") {
+    const action = url.pathname.split("/")[1];
+    return Response.json({ ok: true, [action === "prepare" ? "prepared" : "cancelled"]: true });
   }
   if (url.toString() === "https://api.vobiz.ai/api/v1/Account/test-auth/Call/") {
     return Response.json({ message: "Call fired", request_uuid: providerID });
@@ -117,6 +122,25 @@ describe("isolated Vobiz outbound relay", () => {
     expect((await activeConflict.json()).error).toBe("another_call_active");
     expect((await env.DB.prepare("SELECT COUNT(*) AS count FROM vobiz_pstn_calls").first()).count).toBe(1);
     expect(requests.filter((item) => item.url.includes("api.vobiz.ai"))).toHaveLength(1);
+    const prepareRequests = requests.filter((item) => new URL(item.url).pathname.startsWith("/prepare/"));
+    expect(prepareRequests).toHaveLength(1);
+    expect(prepareRequests[0].redirect).toBe("manual");
+    expect(new URL(prepareRequests[0].url).pathname).toBe(`/prepare/${call.id}`);
+    expect(requests.findIndex((item) => item === prepareRequests[0])).toBeLessThan(
+      requests.findIndex((item) => item.url.includes("api.vobiz.ai")));
+    const actionToken = prepareRequests[0].authorization?.match(/^Bearer (.+)$/)?.[1];
+    const [encodedPayload, encodedSignature] = actionToken?.split(".") || [];
+    const payloadBytes = Uint8Array.from(atob(encodedPayload.replace(/-/g, "+").replace(/_/g, "/")),
+      (character) => character.charCodeAt(0));
+    const tokenPayload = JSON.parse(new TextDecoder().decode(payloadBytes));
+    expect(tokenPayload).toMatchObject({ v: 2, id: call.id, direction: "outbound", action: "prepare" });
+    expect(tokenPayload.exp).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    const keyForToken = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.VOBIZ_BRIDGE_SECRET),
+      { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+    const signature = Uint8Array.from(atob(encodedSignature.replace(/-/g, "+").replace(/_/g, "/")),
+      (character) => character.charCodeAt(0));
+    expect(await crypto.subtle.verify("HMAC", keyForToken, signature,
+      new TextEncoder().encode(encodedPayload))).toBe(true);
 
     const providerRequest = requests.find((item) => item.url.includes("api.vobiz.ai"));
     const answerPath = new URL(providerRequest.payload.answer_url).pathname;
@@ -202,6 +226,104 @@ describe("isolated Vobiz outbound relay", () => {
     expect(hungup.status).toBe(200);
   });
 
+  it.each([
+    ["bridge rejection", () => new Response(null, { status: 503 })],
+    ["bridge timeout", () => { throw new Error("connection timed out"); }],
+    ["bridge redirect", () => Response.redirect("https://unexpected.example/steal", 302)],
+    ["incomplete bridge response", () => Response.json({ ok: true, prepared: false })],
+  ])("never dials if preparation has a %s", async (_, prepareResult) => {
+    const key = crypto.randomUUID();
+    const seen = [];
+    const fetcher = async (input, init) => {
+      const url = new URL(input);
+      seen.push({ url: url.toString(), redirect: init?.redirect, authorization: init?.headers?.authorization });
+      if (url.pathname === "/health") return Response.json({ ok: true, codex_ready: true });
+      if (url.pathname.startsWith("/prepare/")) return prepareResult();
+      if (url.pathname.startsWith("/cancel/")) return Response.json({ ok: true, cancelled: true });
+      throw new Error(`provider should not be called after failed prepare: ${url.origin}`);
+    };
+    const attempt = await createPstnCall(callRequest("Greet me.", key), env, fetcher);
+    expect(attempt.status).toBe(503);
+    const { id, error } = await attempt.json();
+    expect(error).toBe("codex_prepare_failed");
+    expect(seen.map((item) => new URL(item.url).pathname)).toEqual([
+      "/health", `/prepare/${id}`, `/cancel/${id}`,
+    ]);
+    expect(seen[1].redirect).toBe("manual");
+    expect(seen[2].redirect).toBe("manual");
+    expect((await env.DB.prepare(
+      "SELECT status, provider_status, ended_at FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(id).first())).toMatchObject({ status: "failed", provider_status: "codex_prepare_failed",
+      ended_at: expect.any(Number) });
+    const repeated = await createPstnCall(callRequest("Greet me.", key), env, fetcher);
+    expect(repeated.status).toBe(200);
+    expect((await repeated.json()).id).toBe(id);
+    expect(seen).toHaveLength(3);
+  });
+
+  it("cancels a prepared session when Vobiz rejects the call definitively", async () => {
+    const seen = [];
+    const fetcher = async (input, init) => {
+      const url = new URL(input);
+      seen.push(url.pathname);
+      if (url.pathname === "/health") return Response.json({ ok: true, codex_ready: true });
+      if (url.pathname.startsWith("/prepare/")) return Response.json({ ok: true, prepared: true });
+      if (url.origin === "https://api.vobiz.ai") {
+        expect(init.redirect).toBe("manual");
+        return new Response(null, { status: 400 });
+      }
+      if (url.pathname.startsWith("/cancel/")) return Response.json({ ok: true, cancelled: true });
+      throw new Error(`unexpected fetch: ${url.origin}`);
+    };
+    const response = await createPstnCall(callRequest("Greet me."), env, fetcher);
+    expect(response.status).toBe(502);
+    const { id, status, provider_status: providerStatus } = await response.json();
+    expect(status).toBe("failed");
+    expect(providerStatus).toBe("http_400");
+    expect(seen).toEqual(["/health", `/prepare/${id}`, "/api/v1/Account/test-auth/Call/",
+      `/cancel/${id}`]);
+  });
+
+  it("retains preparation if provider dispatch has an unknown outcome", async () => {
+    const seen = [];
+    const fetcher = async (input) => {
+      const url = new URL(input);
+      seen.push(url.pathname);
+      if (url.pathname === "/health") return Response.json({ ok: true, codex_ready: true });
+      if (url.pathname.startsWith("/prepare/")) return Response.json({ ok: true, prepared: true });
+      if (url.origin === "https://api.vobiz.ai") throw new Error("transport outcome unknown");
+      throw new Error("preparation must stay alive for a late provider callback");
+    };
+    const response = await createPstnCall(callRequest("Greet me."), env, fetcher);
+    expect(response.status).toBe(201);
+    const { id, status } = await response.json();
+    expect(status).toBe("dispatch_unknown");
+    expect(seen).toEqual(["/health", `/prepare/${id}`, "/api/v1/Account/test-auth/Call/"]);
+  });
+
+  it("uses action-scoped tokens and the WSS path prefix for bridge HTTP actions", async () => {
+    const call = { id: crypto.randomUUID() };
+    await expect(bridgeActionToken(env.VOBIZ_BRIDGE_SECRET, call, "claim"))
+      .rejects.toThrow("invalid_bridge_action");
+    const seen = [];
+    const prefixEnv = { ...env, VOBIZ_BRIDGE_WSS_URL: "wss://bridge.example/caller-vobiz/vobiz" };
+    const fetcher = async (input) => {
+      const url = new URL(input);
+      seen.push(url.pathname);
+      if (url.pathname === "/caller-vobiz/health") return Response.json({ ok: true, codex_ready: true });
+      if (url.pathname.startsWith("/caller-vobiz/prepare/")) {
+        return Response.json({ ok: true, prepared: true });
+      }
+      if (url.origin === "https://api.vobiz.ai") return Response.json({ request_uuid: PROVIDER_ID });
+      throw new Error(`unexpected fetch: ${url.pathname}`);
+    };
+    const response = await createPstnCall(callRequest("Greet me."), prefixEnv, fetcher);
+    expect(response.status).toBe(201);
+    const { id } = await response.json();
+    expect(seen).toEqual(["/caller-vobiz/health", `/caller-vobiz/prepare/${id}`,
+      "/api/v1/Account/test-auth/Call/"]);
+  });
+
   it("marks unanswered calls failed and preserves a Codex bridge failure on later Hangup", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const noAnswerProviderID = crypto.randomUUID();
@@ -211,9 +333,11 @@ describe("isolated Vobiz outbound relay", () => {
     const noAnswerCall = await noAnswer.json();
     const noAnswerRequest = requests.at(-1).payload;
     const noAnswerPath = new URL(noAnswerRequest.hangup_url).pathname;
-    expect((await SELF.fetch(unsignedCallback(noAnswerPath, "Hangup", false,
-      { CallStatus: "no-answer", HangupCause: "6010" }, noAnswerProviderID))).status).toBe(200);
+    expect((await handleVobizCallback(unsignedCallback(noAnswerPath, "Hangup", false,
+      { CallStatus: "no-answer", HangupCause: "6010" }, noAnswerProviderID), env,
+    "hangup", noAnswerCall.id, noAnswerPath.split("/").at(-1), fakeFetch)).status).toBe(200);
     expect((await (await getPstnCall(env, noAnswerCall.id)).json()).status).toBe("failed");
+    expect(requests.some((item) => item.url === `https://bridge.example/cancel/${noAnswerCall.id}`)).toBe(true);
 
     vi.setSystemTime(Date.now() + 1_100);
     const failedProviderID = crypto.randomUUID();
@@ -233,8 +357,9 @@ describe("isolated Vobiz outbound relay", () => {
       }, body: JSON.stringify({ event, detail: "Codex failed" }) })).status).toBe(200);
     }
     const failedPath = new URL(failedRequest.hangup_url).pathname;
-    expect((await SELF.fetch(unsignedCallback(failedPath, "Hangup", false,
-      { CallStatus: "completed" }, failedProviderID))).status).toBe(200);
+    expect((await handleVobizCallback(unsignedCallback(failedPath, "Hangup", false,
+      { CallStatus: "completed" }, failedProviderID), env, "hangup", failedCall.id,
+    failedPath.split("/").at(-1), fakeFetch)).status).toBe(200);
     expect((await (await getPstnCall(env, failedCall.id)).json()).status).toBe("failed");
   });
 
@@ -246,8 +371,11 @@ describe("isolated Vobiz outbound relay", () => {
     expect(first.status).toBe(201);
     const payload = requests.at(-1).payload;
     expect(payload.time_limit).toBe(180);
-    expect((await SELF.fetch(unsignedCallback(new URL(payload.hangup_url).pathname,
-      "Hangup", false, { CallStatus: "no-answer" }))).status).toBe(200);
+    const firstCall = await first.json();
+    const firstHangupPath = new URL(payload.hangup_url).pathname;
+    expect((await handleVobizCallback(unsignedCallback(firstHangupPath,
+      "Hangup", false, { CallStatus: "no-answer" }), env, "hangup", firstCall.id,
+    firstHangupPath.split("/").at(-1), fakeFetch)).status).toBe(200);
     vi.setSystemTime(justBeforeBoundary + 2);
     const second = await createPstnCall(callRequest("Try after first ended."), env, fakeFetch);
     expect(second.status).toBe(429);
@@ -266,14 +394,133 @@ describe("isolated Vobiz outbound relay", () => {
     const answerPath = new URL(requests.at(-1).payload.answer_url).pathname;
     const callbackToken = answerPath.split("/").at(-1);
     const unavailableFetch = async (input) => {
+      if (new URL(input).pathname.startsWith("/cancel/")) {
+        return Response.json({ ok: true, cancelled: true });
+      }
       expect(new URL(input).pathname).toBe("/health");
-      return Response.json({ ok: true, codex_ready: false });
+      return Response.json({ ok: true, codex_ready: true, runtime_ready: false });
     };
     const answered = await handleVobizCallback(unsignedCallback(answerPath, "StartApp", false,
       {}, providerID), env, "answer", call.id, callbackToken, unavailableFetch);
     expect(answered.status).toBe(200);
     expect(await answered.text()).toContain("<Hangup/>");
     expect((await (await getPstnCall(env, call.id)).json()).status).toBe("failed");
+  });
+
+  it("streams a prepared outbound call even while generic Codex capacity is reserved", async () => {
+    const providerID = crypto.randomUUID();
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetchFor(providerID));
+    expect(placed.status).toBe(201);
+    const { id } = await placed.json();
+    const answerPath = new URL(requests.at(-1).payload.answer_url).pathname;
+    const callbackToken = answerPath.split("/").at(-1);
+    const preparedHealth = async (input) => {
+      expect(new URL(input).pathname).toBe("/health");
+      return Response.json({ ok: true, codex_ready: false, runtime_ready: true });
+    };
+    const response = await handleVobizCallback(unsignedCallback(answerPath, "StartApp", false,
+      {}, providerID), env, "answer", id, callbackToken, preparedHealth);
+    expect(response.status).toBe(200);
+    const xml = await response.text();
+    expect(xml).toContain('contentType="audio/x-l16;rate=16000"');
+    expect(xml).toContain("wss://bridge.example/vobiz?token=");
+    expect((await (await getPstnCall(env, id)).json()).status).toBe("connected");
+  });
+
+  it("expires interrupted preparation and blocks its suspended request from dialing", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const startedAt = Date.now();
+    const key = crypto.randomUUID();
+    const seen = [];
+    let callID;
+    const fetcher = async (input) => {
+      const url = new URL(input);
+      seen.push(url.pathname);
+      if (url.pathname === "/health") return Response.json({ ok: true, codex_ready: true });
+      if (url.pathname.startsWith("/prepare/")) {
+        callID = url.pathname.split("/").at(-1);
+        vi.setSystemTime(startedAt + 61_000);
+        const expired = await getPstnCall(env, callID, fetcher);
+        expect(await expired.json()).toMatchObject({ id: callID, status: "failed",
+          provider_status: "prepare_interrupted" });
+        return Response.json({ ok: true, prepared: true });
+      }
+      if (url.pathname.startsWith("/cancel/")) return Response.json({ ok: true, cancelled: true });
+      throw new Error("an interrupted preparation must not reach Vobiz");
+    };
+    const result = await createPstnCall(callRequest("Greet me.", key), env, fetcher);
+    expect(result.status).toBe(409);
+    expect(await result.json()).toMatchObject({ error: "dispatch_not_permitted",
+      call: { id: callID, status: "failed", provider_status: "prepare_interrupted" } });
+    expect(seen).toEqual(["/health", `/prepare/${callID}`, `/cancel/${callID}`,
+      `/cancel/${callID}`]);
+    const retry = await createPstnCall(callRequest("Greet me.", key), env, fetcher);
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({ id: callID, status: "failed",
+      provider_status: "prepare_interrupted" });
+    expect(seen).toHaveLength(4);
+  });
+
+  it("refuses to dial when a preparation itself resumes after its age limit", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const startedAt = Date.now();
+    const seen = [];
+    let callID;
+    const fetcher = async (input) => {
+      const url = new URL(input);
+      seen.push(url.pathname);
+      if (url.pathname === "/health") return Response.json({ ok: true, codex_ready: true });
+      if (url.pathname.startsWith("/prepare/")) {
+        callID = url.pathname.split("/").at(-1);
+        vi.setSystemTime(startedAt + 61_000);
+        return Response.json({ ok: true, prepared: true });
+      }
+      if (url.pathname.startsWith("/cancel/")) return Response.json({ ok: true, cancelled: true });
+      throw new Error("expired preparation must not reach Vobiz");
+    };
+    const result = await createPstnCall(callRequest("Greet me."), env, fetcher);
+    expect(result.status).toBe(409);
+    expect(await result.json()).toMatchObject({ error: "dispatch_not_permitted",
+      call: { id: callID, status: "failed", provider_status: "prepare_interrupted" } });
+    expect(seen).toEqual(["/health", `/prepare/${callID}`, `/cancel/${callID}`,
+      `/cancel/${callID}`]);
+  });
+
+  it("cleans a stale preparation before admitting a different call", async () => {
+    const staleID = crypto.randomUUID();
+    const createdAt = Date.now() - 61_000;
+    await env.DB.prepare(
+      `INSERT INTO vobiz_pstn_calls
+        (id, direction, from_number, to_number, instructions, opening_speech,
+         callback_token_hash, status, provider_status, idempotency_key, request_hash,
+         created_at, updated_at)
+       VALUES (?1, 'outbound', ?2, ?3, 'old brief', 'Old AI greeting',
+         ?4, 'dispatching', 'preparing_voice', ?5, ?6, ?7, ?7)`,
+    ).bind(staleID, DID, DESTINATION, "a".repeat(64), crypto.randomUUID(),
+      "b".repeat(64), createdAt).run();
+    const seen = [];
+    let occupied = true;
+    const fetcher = async (input) => {
+      const url = new URL(input);
+      seen.push(url.pathname);
+      if (url.pathname === `/cancel/${staleID}`) {
+        occupied = false;
+        return Response.json({ ok: true, cancelled: true });
+      }
+      if (url.pathname === "/health") return Response.json({ ok: true, codex_ready: !occupied });
+      if (url.pathname.startsWith("/prepare/")) return Response.json({ ok: true, prepared: true });
+      if (url.origin === "https://api.vobiz.ai") return Response.json({ request_uuid: PROVIDER_ID });
+      throw new Error(`unexpected fetch: ${url.pathname}`);
+    };
+    const newCall = await createPstnCall(callRequest("Greet me."), env, fetcher);
+    expect(newCall.status).toBe(201);
+    expect(seen[0]).toBe(`/cancel/${staleID}`);
+    expect(seen[1]).toBe("/health");
+    expect((await env.DB.prepare(
+      "SELECT status, provider_status, ended_at FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(staleID).first())).toMatchObject({ status: "failed",
+      provider_status: "prepare_interrupted", ended_at: expect.any(Number) });
+    expect(seen.filter((path) => path === "/api/v1/Account/test-auth/Call/")).toHaveLength(1);
   });
 
   it("reads only the queued, live, or CDR state for an existing local call", async () => {
@@ -342,12 +589,14 @@ describe("isolated Vobiz outbound relay", () => {
       new Response(null, { status: 404 }), new Response(null, { status: 404 }),
       Response.json({ uuid: PROVIDER_ID, ring_time: 5, answer_time: "2026-09-29T15:00:05Z",
         duration: 12, billsec: 7, hangup_cause: "NORMAL_CLEARING",
+        codec: "PCMU", mos: 4.2, jitter: 18.5, packet_loss: 0.5,
         hangup_source: "Callee", hangup_disposition: "recv_bye",
         caller_id_number: DID, destination_number: DESTINATION }),
     ]));
     expect(await answered.json()).toEqual({ call_id: id, provider: { source: "cdr", state: "ended",
       hangup_cause: "NORMAL_CLEARING", hangup_cause_code: null, failure_code: null,
       ring_time_seconds: 5, answer_time_present: true, duration: 12, billsec: 7,
+      codec: "PCMU", mos: 4.2, jitter_ms: 18.5, packet_loss_percent: 0.5,
       hangup_source: "Callee", hangup_disposition: "recv_bye" } });
   });
 
@@ -364,6 +613,7 @@ describe("isolated Vobiz outbound relay", () => {
       new URL(input).search ? new Response(null, { status: 404 }) :
         Response.json({ uuid: PROVIDER_ID, hangup_cause: "NORMAL_CLEARING",
           ring_time: null, answer_time: "", duration: -1, billsec: 100_000,
+          codec: "private codec value with spaces", mos: "4.5", jitter: -2, packet_loss: 101,
           hangup_source: "free-form private text", hangup_disposition: "unexpected" }));
     expect(await invalidMetrics.json()).toEqual({ call_id: id, provider: { source: "cdr", state: "ended",
       hangup_cause: "NORMAL_CLEARING", hangup_cause_code: null, failure_code: null,

@@ -1,6 +1,9 @@
 const E164_INDIA = /^\+91[1-9]\d{9}$/;
 const CALLBACK_BYTES = 16_384;
 const MAX_CALL_MS = 3 * 60_000;
+const BRIDGE_PREPARE_TIMEOUT_MS = 40_000;
+const BRIDGE_CANCEL_TIMEOUT_MS = 1_500;
+const PREPARATION_STALE_MS = 60_000;
 const MAX_OPENING_SPEECH_CHARS = 320;
 const PROVIDER_PROBE_BYTES = 16_384;
 const NOTIFICATION_CLAIM_DELAY_MS = 30_000;
@@ -174,12 +177,56 @@ export async function bridgeToken(secret, call, now = Date.now()) {
   return `${payload}.${base64url(await hmac(secret, payload))}`;
 }
 
+export async function bridgeActionToken(secret, call, action, now = Date.now()) {
+  if (!["prepare", "cancel"].includes(action)) throw new Error("invalid_bridge_action");
+  const payload = base64url(new TextEncoder().encode(JSON.stringify({
+    v: 2, id: call.id, exp: Math.floor(now / 1000) + 180,
+    direction: "outbound", action,
+  })));
+  return `${payload}.${base64url(await hmac(secret, payload))}`;
+}
+
+function bridgeActionURL(env, call, action) {
+  const url = bridgeURL(env);
+  if (!url || !url.pathname.endsWith("/vobiz")) return null;
+  url.protocol = "https:";
+  url.pathname = `${url.pathname.slice(0, -"vobiz".length)}${action}/${call.id}`;
+  return url.toString();
+}
+
+async function bridgeAction(env, call, action, fetcher = fetch) {
+  const url = bridgeActionURL(env, call, action);
+  if (!url) return { ok: false, reason: "invalid_bridge_url" };
+  try {
+    const response = await fetcher(url, {
+      method: "GET",
+      headers: { authorization: `Bearer ${await bridgeActionToken(env.VOBIZ_BRIDGE_SECRET, call, action)}` },
+      redirect: "manual",
+      signal: AbortSignal.timeout(action === "prepare"
+        ? BRIDGE_PREPARE_TIMEOUT_MS : BRIDGE_CANCEL_TIMEOUT_MS),
+    });
+    if (response.status !== 200) return { ok: false,
+      reason: response.status >= 300 && response.status < 400 ? "redirect" : "bridge_http_error" };
+    const result = JSON.parse(await boundedText(response, 1_024));
+    return result?.ok === true && result?.[action === "prepare" ? "prepared" : "cancelled"] === true
+      ? { ok: true } : { ok: false, reason: "invalid_ack" };
+  } catch (error) {
+    // Preparation fails closed before dialing. Cancellation is best effort; the bridge also has a TTL.
+    return { ok: false, reason: error?.name === "TimeoutError" ? "timeout" : "transport_error" };
+  }
+}
+
+function boundedElapsed(startedAt) {
+  return Math.max(0, Math.min(120_000, Date.now() - startedAt));
+}
+
 function streamXML(url) {
   const escaped = url.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   return `<?xml version="1.0" encoding="UTF-8"?><Response><Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-l16;rate=16000">${escaped}</Stream></Response>`;
 }
 
-async function bridgeReady(env, fetcher = fetch, timeoutMs = 2_000, inbound = false) {
+async function bridgeReady(env, fetcher = fetch, timeoutMs = 2_000,
+  inbound = false, readinessField = "codex_ready") {
   const url = bridgeURL(env);
   if (!url) return false;
   url.protocol = "https:";
@@ -188,11 +235,27 @@ async function bridgeReady(env, fetcher = fetch, timeoutMs = 2_000, inbound = fa
     const response = await fetcher(url.toString(), { signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) return false;
     const state = await response.json();
-    return state?.ok === true && state?.codex_ready === true &&
+    return state?.ok === true && state?.[readinessField] === true &&
       (!inbound || state?.inbound_enabled === true);
   } catch (error) {
     console.error(JSON.stringify({ message: "Vobiz Codex bridge health unavailable", error: String(error) }));
     return false;
+  }
+}
+
+async function expireStalePreparations(env, callID = null, fetcher = fetch) {
+  const now = Date.now();
+  const expired = await env.DB.prepare(
+    `UPDATE vobiz_pstn_calls
+        SET status = 'failed', provider_status = 'prepare_interrupted',
+            updated_at = ?1, ended_at = ?1
+      WHERE status = 'dispatching' AND provider_status = 'preparing_voice'
+        AND ended_at IS NULL AND created_at <= ?2
+        AND (?3 IS NULL OR id = ?3)
+      RETURNING id`,
+  ).bind(now, now - PREPARATION_STALE_MS, callID).all();
+  for (const row of expired.results) {
+    await bridgeAction(env, { id: row.id }, "cancel", fetcher);
   }
 }
 
@@ -224,6 +287,7 @@ export async function createPstnCall(request, env, fetcher = fetch) {
   const from = normalizedNumber(env.VOBIZ_NUMBER);
   if (!from) return json(503, { error: "invalid_vobiz_number_configuration" });
   const requestHash = await hashCredential(JSON.stringify({ to, briefing, openingSpeech }));
+  await expireStalePreparations(env, null, fetcher);
   const prior = await env.DB.prepare(
     "SELECT * FROM vobiz_pstn_calls WHERE idempotency_key = ?1",
   ).bind(idempotencyKey).first();
@@ -257,8 +321,8 @@ export async function createPstnCall(request, env, fetcher = fetch) {
   const inserted = await env.DB.prepare(
     `INSERT INTO vobiz_pstn_calls
       (id, direction, from_number, to_number, instructions, opening_speech, callback_token_hash,
-       status, idempotency_key, request_hash, created_at, updated_at)
-     SELECT ?1, 'outbound', ?2, ?3, ?4, ?5, ?6, 'dispatching', ?7, ?8, ?9, ?9
+       status, provider_status, idempotency_key, request_hash, created_at, updated_at)
+     SELECT ?1, 'outbound', ?2, ?3, ?4, ?5, ?6, 'dispatching', 'preparing_voice', ?7, ?8, ?9, ?9
        WHERE NOT EXISTS (
          SELECT 1 FROM vobiz_pstn_calls WHERE ended_at IS NULL
            AND status IN ('dispatching', 'queued', 'ringing', 'connected', 'dispatch_unknown')
@@ -280,6 +344,24 @@ export async function createPstnCall(request, env, fetcher = fetch) {
     return json(409, { error: "another_call_active" });
   }
 
+  const bridgeCall = { id };
+  const prepareStartedAt = Date.now();
+  const prepared = await bridgeAction(env, bridgeCall, "prepare", fetcher);
+  if (!prepared.ok) {
+    console.warn(JSON.stringify({ event: "vobiz_prewarm_failed", call_id: id,
+      reason: prepared.reason, elapsed_ms: boundedElapsed(prepareStartedAt) }));
+    const stoppedAt = Date.now();
+    await env.DB.prepare(
+      `UPDATE vobiz_pstn_calls SET status = 'failed', provider_status = 'codex_prepare_failed',
+          updated_at = ?2, ended_at = ?2 WHERE id = ?1 AND status = 'dispatching'
+            AND provider_status = 'preparing_voice'`,
+    ).bind(id, stoppedAt).run();
+    await bridgeAction(env, bridgeCall, "cancel", fetcher);
+    return json(503, { error: "codex_prepare_failed", id });
+  }
+  console.info(JSON.stringify({ event: "vobiz_prewarm_ready", call_id: id,
+    elapsed_ms: boundedElapsed(prepareStartedAt) }));
+
   const origin = baseURL(env);
   const callback = (kind) => `${origin}/v1/vobiz/${kind}/${id}/${callbackToken}`;
   const payload = {
@@ -294,13 +376,32 @@ export async function createPstnCall(request, env, fetcher = fetch) {
     const stoppedAt = Date.now();
     await env.DB.prepare(
       `UPDATE vobiz_pstn_calls SET status = 'failed', provider_status = 'rate_limited',
-          updated_at = ?2, ended_at = ?2 WHERE id = ?1 AND status = 'dispatching'`,
+          updated_at = ?2, ended_at = ?2 WHERE id = ?1 AND status = 'dispatching'
+            AND provider_status = 'preparing_voice'`,
     ).bind(id, stoppedAt).run();
+    await bridgeAction(env, bridgeCall, "cancel", fetcher);
     return json(429, { error: "rate_limited", id });
+  }
+  // This compare-and-swap is the final gate before a provider request. If another
+  // request expired an interrupted preparation, the original request must not dial.
+  const dispatchAt = Date.now();
+  const dispatch = await env.DB.prepare(
+    `UPDATE vobiz_pstn_calls SET provider_status = 'provider_dispatch_started', updated_at = ?2
+      WHERE id = ?1 AND status = 'dispatching' AND provider_status = 'preparing_voice'
+        AND ended_at IS NULL AND created_at > ?3`,
+  ).bind(id, dispatchAt, dispatchAt - PREPARATION_STALE_MS).run();
+  if (!dispatch.meta.changes) {
+    await expireStalePreparations(env, id, fetcher);
+    await bridgeAction(env, bridgeCall, "cancel", fetcher);
+    const current = await env.DB.prepare(
+      "SELECT * FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(id).first();
+    return json(409, { error: "dispatch_not_permitted", call: current ? publicCall(current) : null });
   }
   let status = "dispatch_unknown";
   let providerStatus = "transport_failure";
   let providerUUID = null;
+  const dispatchStartedAt = Date.now();
   try {
     const response = await fetcher(`https://api.vobiz.ai/api/v1/Account/${encodeURIComponent(env.VOBIZ_AUTH_ID)}/Call/`, {
       method: "POST",
@@ -310,6 +411,7 @@ export async function createPstnCall(request, env, fetcher = fetch) {
         "x-auth-token": env.VOBIZ_AUTH_TOKEN,
       },
       body: JSON.stringify(payload),
+      redirect: "manual",
       signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) {
@@ -324,6 +426,8 @@ export async function createPstnCall(request, env, fetcher = fetch) {
   } catch {
     // A timeout may occur after Vobiz accepted the request. Never issue a second call automatically.
   }
+  console.info(JSON.stringify({ event: "vobiz_provider_dispatch", call_id: id,
+    outcome: status, elapsed_ms: boundedElapsed(dispatchStartedAt) }));
   await env.DB.prepare(
     `UPDATE vobiz_pstn_calls
         SET status = CASE WHEN status = 'dispatching' THEN ?2 ELSE status END,
@@ -331,12 +435,14 @@ export async function createPstnCall(request, env, fetcher = fetch) {
             ended_at = CASE WHEN ?2 = 'failed' THEN ?5 ELSE ended_at END
       WHERE id = ?1`,
   ).bind(id, status, providerStatus, providerUUID, Date.now()).run();
+  if (status === "failed") await bridgeAction(env, bridgeCall, "cancel", fetcher);
   const call = await env.DB.prepare("SELECT * FROM vobiz_pstn_calls WHERE id = ?1").bind(id).first();
   return json(status === "failed" ? 502 : 201, publicCall(call));
 }
 
-export async function getPstnCall(env, callID) {
+export async function getPstnCall(env, callID, fetcher = fetch) {
   if (!isUUID(callID)) return json(404, { error: "call_not_found" });
+  await expireStalePreparations(env, callID.toLowerCase(), fetcher);
   const row = await env.DB.prepare(
     "SELECT * FROM vobiz_pstn_calls WHERE id = ?1",
   ).bind(callID.toLowerCase()).first();
@@ -353,6 +459,11 @@ function providerSeconds(value) {
   return Number.isSafeInteger(value) && value >= 0 && value <= 86_400 ? value : null;
 }
 
+function providerQualityNumber(value, minimum, maximum) {
+  return typeof value === "number" && Number.isFinite(value) &&
+    value >= minimum && value <= maximum ? value : null;
+}
+
 function providerSnapshot(source, result, expectedUUID) {
   const data = Array.isArray(result?.data) && result.data.length === 1
     ? result.data[0] : result?.data && !Array.isArray(result.data) ? result.data : result;
@@ -366,6 +477,10 @@ function providerSnapshot(source, result, expectedUUID) {
   const duration = source === "cdr" ? providerSeconds(data.duration) : null;
   const billsec = source === "cdr" ? providerSeconds(data.billsec) : null;
   const ringTime = source === "cdr" ? providerSeconds(data.ring_time) : null;
+  const codec = source === "cdr" ? providerCode(data.codec, /^[A-Za-z0-9._-]{1,20}$/) : null;
+  const mos = source === "cdr" ? providerQualityNumber(data.mos, 1, 5) : null;
+  const jitter = source === "cdr" ? providerQualityNumber(data.jitter, 0, 60_000) : null;
+  const packetLoss = source === "cdr" ? providerQualityNumber(data.packet_loss, 0, 100) : null;
   return {
     source,
     state: source === "cdr" ? "ended" : providerCode(data.call_status),
@@ -377,6 +492,10 @@ function providerSnapshot(source, result, expectedUUID) {
       answer_time_present: typeof data.answer_time === "string" && data.answer_time.trim().length > 0,
       ...(duration !== null ? { duration } : {}),
       ...(billsec !== null ? { billsec } : {}),
+      ...(codec !== null ? { codec } : {}),
+      ...(mos !== null ? { mos } : {}),
+      ...(jitter !== null ? { jitter_ms: jitter } : {}),
+      ...(packetLoss !== null ? { packet_loss_percent: packetLoss } : {}),
       hangup_source: ["Caller", "Callee"].includes(data.hangup_source) ? data.hangup_source : null,
       hangup_disposition: ["send_bye", "recv_bye"].includes(data.hangup_disposition)
         ? data.hangup_disposition : null,
@@ -627,13 +746,16 @@ export async function handleVobizCallback(request, env, kind, callID, callbackTo
   const providerUUID = identity.providerUUID;
   if (row.ended_at && kind !== "hangup") return xmlResponse("<?xml version=\"1.0\"?><Response><Hangup/></Response>");
   if (kind === "answer") {
-    if (!(await bridgeReady(env, fetcher))) {
+    // An outbound call has already prepared its realtime session before dialing.
+    // The general codex_ready capacity flag may be false while that session is reserved.
+    if (!(await bridgeReady(env, fetcher, 2_000, false, "runtime_ready"))) {
       const now = Date.now();
       await env.DB.prepare(
         `UPDATE vobiz_pstn_calls SET status = 'failed', provider_status = 'codex_bridge_unavailable',
             vobiz_call_uuid = COALESCE(vobiz_call_uuid, ?2), updated_at = ?3, ended_at = ?3
           WHERE id = ?1 AND ended_at IS NULL`,
       ).bind(row.id, providerUUID, now).run();
+      await bridgeAction(env, row, "cancel", fetcher);
       return xmlResponse("<?xml version=\"1.0\"?><Response><Hangup/></Response>");
     }
     await env.DB.prepare(
@@ -672,6 +794,7 @@ export async function handleVobizCallback(request, env, kind, callID, callbackTo
             updated_at = ?5, ended_at = COALESCE(ended_at, ?5)
       WHERE id = ?1`,
   ).bind(row.id, status, providerStatus, providerUUID, now).run();
+  if (!row.bridge_claimed_at) await bridgeAction(env, row, "cancel", fetcher);
   return callbackAcknowledged();
 }
 
