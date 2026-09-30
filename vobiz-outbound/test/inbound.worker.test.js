@@ -59,6 +59,7 @@ const healthyBridge = async (input) => {
 };
 
 const enabledEnv = () => ({ ...env, VOBIZ_INBOUND_ENABLED: "true" });
+const disabledEnv = () => ({ ...env, VOBIZ_INBOUND_ENABLED: "false" });
 
 describe("signed Vobiz inbound relay", () => {
   beforeEach(async () => {
@@ -78,7 +79,7 @@ describe("signed Vobiz inbound relay", () => {
     });
     expect(unsigned.status).toBe(403);
     const callback = await signedCallback(ANSWER_PATH, "StartApp", "12345678901234567890");
-    const response = await SELF.fetch(callback);
+    const response = await handleInboundCallback(callback, disabledEnv(), "answer", healthyBridge);
     expect(response.status).toBe(200);
     expect(await response.text()).toContain("<Hangup/>");
     const inbox = await SELF.fetch("https://relay.example/v1/inbound-calls", {
@@ -297,7 +298,10 @@ describe("signed Vobiz inbound relay", () => {
 
   it("accepts the exact 256-bit token URL while disabled and fails closed for missing or wrong secrets", async () => {
     const callUUID = crypto.randomUUID();
-    const accepted = await SELF.fetch(unsignedCallback(TOKEN_ANSWER_PATH, "StartApp", callUUID));
+    const accepted = await handleInboundCallback(
+      unsignedCallback(TOKEN_ANSWER_PATH, "StartApp", callUUID),
+      disabledEnv(), "answer", healthyBridge, CALLBACK_TOKEN,
+    );
     expect(accepted.status).toBe(200);
     expect(await accepted.text()).toContain("<Hangup/>");
     expect((await env.DB.prepare("SELECT status FROM vobiz_inbound_calls").first()).status)

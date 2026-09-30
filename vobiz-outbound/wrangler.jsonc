@@ -7,7 +7,7 @@
   "workers_dev": true,
   "routes": [{ "pattern": "vobiz.forgeme.xyz", "custom_domain": true }],
   "vars": {
-    "VOBIZ_INBOUND_ENABLED": "false"
+    "VOBIZ_INBOUND_ENABLED": "true"
   },
   "observability": {
     "enabled": false,

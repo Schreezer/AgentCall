@@ -1,6 +1,6 @@
 # Vobiz PSTN relay pilot
 
-This is a separate Cloudflare Worker for Hermes-initiated outbound calls and an inbound answer path that remains disabled at the Worker gate. The purchased DID `+918071580171` is attached to the Vobiz `Hermes_Inbound` Voice Application. Inference-aware Worker version `204271d4-bed8-4c43-827f-2dc92eceb71a` is deployed with inbound admission disabled; DebianBat's inference-aware bridge has inbound admission and direct Hermes Telegram delivery configured and is publicly healthy. A synthetic post-call Sol inference using Hermes credentials succeeded, but a real inbound phone callback, conversation, and Telegram alert remain unproven. Jio forwarding is not configured.
+This is a separate Cloudflare Worker for Hermes-initiated outbound calls and a controlled inbound answer pilot. The purchased DID `+918071580171` is attached to the Vobiz `Hermes_Inbound` Voice Application. Inference-aware Worker version `931acae7-3009-44d6-9b2e-cf5b59dcd7fc` is deployed with inbound admission enabled; DebianBat's inference-aware bridge has inbound admission and direct Hermes Telegram delivery configured and is publicly healthy. The deployment occurred with zero active PSTN calls after 63 tests, type checking, and a Wrangler dry run passed. The planned real phone callback test with inbound disabled was not completed before this enabled pilot. A synthetic post-call Sol inference using Hermes credentials succeeded, but a real provider callback, inbound phone conversation, Sol reason derived from that call, and Telegram owner alert remain unproven. Jio Busy forwarding is not configured, so only callers who dial the Vobiz DID directly are affected.
 
 ## Routes
 
@@ -65,7 +65,7 @@ If Hermes notification mode is unset, the paired Caller relay remains the fallba
 
 This pilot has no automatic record deletion. Inbound caller metadata and bounded reports remain in D1 until deliberately removed; signed nonce hashes and token-route callback fingerprints are retained to prevent replay or altered retries. Decide a retention and export policy before sustained use.
 
-The DID is already attached to the Vobiz `Hermes_Inbound` Application, which immediately controls direct calls to `+918071580171`. The token-capable Worker is deployed with inbound off, a fresh callback bearer is stored as a Cloudflare secret, and the Application's distinct POST Answer and Hangup URLs use the token-suffixed routes. DebianBat's Codex bridge and Hermes Telegram delivery are configured and public health reports ready. The remaining activation sequence is: confirm one real `blocked_disabled` Answer/Hangup callback; then enable the Worker flag and place a controlled direct-DID conversation test. Do not enable Jio forwarding until that full call and owner message are proven. [Attaching a number](https://www.vobiz.ai/docs/applications/attach-number) changes incoming routing immediately.
+The DID is already attached to the Vobiz `Hermes_Inbound` Application, which immediately controls direct calls to `+918071580171`. The token-capable Worker is deployed with inbound on, a fresh callback bearer is stored as a Cloudflare secret, and the Application's distinct POST Answer and Hangup URLs use the token-suffixed routes. DebianBat's Codex bridge and Hermes Telegram delivery are configured and public health reports ready. The next step is one controlled direct-DID call that verifies the real Answer and Hangup callbacks, two-way speech, stored result, inferred or quote fallback label, and Telegram owner alert. The path fails closed with `<Hangup/>` when authentication, bridge readiness, capacity, or identity checks fail. If the provider callbacks or media path do not behave as expected, immediately set `VOBIZ_INBOUND_ENABLED=false`, redeploy, and preserve the records for diagnosis. Do not enable Jio forwarding until the direct-DID call and owner message are proven. [Attaching a number](https://www.vobiz.ai/docs/applications/attach-number) changes incoming routing immediately.
 
 ## Configuration
 
@@ -83,7 +83,7 @@ Dedicated D1: `caller-vobiz-outbound` (`6a478995-5ebf-4d77-a7e5-3a7d700e4a91`, A
 | `VOBIZ_BRIDGE_WSS_URL` | Public WSS bridge endpoint including its `/vobiz` path. |
 | `VOBIZ_ALLOWED_DESTINATIONS` | Comma-separated canonical `+91` numbers permitted for outbound calls. For the pilot, set only the user's own self-test number. |
 | `VOBIZ_OUTBOUND_ENABLED` | Set to `false` first. Set to `true` only for the controlled outbound pilot. |
-| `VOBIZ_INBOUND_ENABLED` | Public Wrangler var pinned to `false`. Change to `true` only after authenticated callback proof, healthy inbound bridge, and a controlled DID routing test. |
+| `VOBIZ_INBOUND_ENABLED` | Public Wrangler var currently `true` for the controlled direct-DID pilot. Set it to `false` and redeploy for immediate admission rollback. |
 
 The bridge should set `VOBIZ_RELAY_URL` to this Worker's public origin. Hermes should set `HERMES_PSTN_RELAY_URL` to the same origin. Their bearer tokens are distinct. No inbound number linkage is needed for outbound calls.
 
