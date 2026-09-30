@@ -125,6 +125,10 @@ function publicCall(row) {
     direction: row.direction,
     status: row.status,
     provider_status: row.provider_status,
+    ...(row.direction === "outbound" ? {
+      provider_terminal_outcome: row.provider_terminal_outcome || null,
+      bridge_terminal_event: row.bridge_terminal_event || null,
+    } : {}),
     from_number: row.from_number,
     to_number: row.to_number,
     summary: row.summary,
@@ -171,9 +175,17 @@ async function hmac(keyValue, message) {
 }
 
 export async function bridgeToken(secret, call, now = Date.now()) {
-  const payload = base64url(new TextEncoder().encode(JSON.stringify({
+  const token = {
     v: 1, id: call.id, exp: Math.floor(now / 1000) + 180, direction: call.direction,
-  })));
+  };
+  if (call.direction === "outbound") {
+    if (!isUUID(call.vobiz_call_uuid)) throw new Error("provider_call_id_required");
+    token.v = 2;
+    token.provider_call_id = call.vobiz_call_uuid.toLowerCase();
+  } else if (call.direction !== "inbound") {
+    throw new Error("invalid_bridge_direction");
+  }
+  const payload = base64url(new TextEncoder().encode(JSON.stringify(token)));
   return `${payload}.${base64url(await hmac(secret, payload))}`;
 }
 
@@ -747,21 +759,18 @@ export async function handleVobizCallback(request, env, kind, callID, callbackTo
   if (row.ended_at && kind !== "hangup") return xmlResponse("<?xml version=\"1.0\"?><Response><Hangup/></Response>");
   if (kind === "answer") {
     // An outbound call has already prepared its realtime session before dialing.
-    // The general codex_ready capacity flag may be false while that session is reserved.
-    if (!(await bridgeReady(env, fetcher, 2_000, false, "runtime_ready"))) {
-      const now = Date.now();
-      await env.DB.prepare(
-        `UPDATE vobiz_pstn_calls SET status = 'failed', provider_status = 'codex_bridge_unavailable',
-            vobiz_call_uuid = COALESCE(vobiz_call_uuid, ?2), updated_at = ?3, ended_at = ?3
-          WHERE id = ?1 AND ended_at IS NULL`,
-      ).bind(row.id, providerUUID, now).run();
-      await bridgeAction(env, row, "cancel", fetcher);
+    // A second bridge health fetch here delays the answered caller and can fail
+    // while the already-prepared voice session is ready. The signed stream token
+    // carries the callback-verified provider call ID to the bridge instead.
+    const connected = await env.DB.prepare(
+      `UPDATE vobiz_pstn_calls SET status = 'connected', vobiz_call_uuid = ?2, updated_at = ?3
+       WHERE id = ?1 AND ended_at IS NULL
+         AND status IN ('dispatching', 'queued', 'ringing', 'connected', 'dispatch_unknown')
+         AND (vobiz_call_uuid IS NULL OR lower(vobiz_call_uuid) = ?2)`,
+    ).bind(row.id, providerUUID, Date.now()).run();
+    if (!connected.meta.changes) {
       return xmlResponse("<?xml version=\"1.0\"?><Response><Hangup/></Response>");
     }
-    await env.DB.prepare(
-      `UPDATE vobiz_pstn_calls SET status = 'connected', vobiz_call_uuid = ?2, updated_at = ?3
-       WHERE id = ?1 AND ended_at IS NULL`,
-    ).bind(row.id, providerUUID, Date.now()).run();
     row.vobiz_call_uuid = providerUUID;
     row.status = "connected";
     const stream = bridgeURL(env);
@@ -778,22 +787,50 @@ export async function handleVobizCallback(request, env, kind, callID, callbackTo
   const callStatus = String(params.get("CallStatus") || "").trim().toLowerCase();
   const hangupCause = String(params.get("HangupCause") || "").trim().toUpperCase();
   const providerStatus = [callStatus, hangupCause].filter(Boolean).join(":").slice(0, 80) || "hangup";
-  const terminalFailure = row.status === "failed" || row.status === "canceled";
   const answered = row.status === "connected" || row.status === "completed" || Boolean(row.bridge_claimed_at);
   const canceled = !answered && (["canceled", "cancelled"].includes(callStatus) ||
     ["1000", "ORIGINATOR_CANCEL", "CANCELED", "CANCELLED"].includes(hangupCause));
   const failed = ["busy", "failed", "timeout", "no-answer"].includes(callStatus) ||
     ["3000", "3010", "6010", "6020", "USER_BUSY", "NO_ANSWER", "CALL_REJECTED",
       "REJECTED", "MEDIA_TIMEOUT", "SERVICE_UNAVAILABLE"].includes(hangupCause);
-  const status = terminalFailure ? row.status : failed ? "failed" : canceled ? "canceled" :
+  const providerOutcome = failed ? "failed" : canceled ? "canceled" :
     answered || callStatus === "completed" ? "completed" : "failed";
   const now = Date.now();
+  // Provider completion says the phone leg ended; only a bridge terminal
+  // report proves the voice session ended successfully. Evaluate both pieces
+  // of evidence in this UPDATE so a concurrent bridge report cannot be lost.
+  // Rows ended before the evidence columns existed retain their old outcome.
   await env.DB.prepare(
     `UPDATE vobiz_pstn_calls
-        SET status = ?2, provider_status = ?3, vobiz_call_uuid = COALESCE(vobiz_call_uuid, ?4),
-            updated_at = ?5, ended_at = COALESCE(ended_at, ?5)
+        SET status = CASE
+              WHEN provider_terminal_outcome IS NULL AND bridge_terminal_event IS NULL
+                AND ended_at IS NOT NULL THEN status
+              WHEN bridge_terminal_event = 'failed' THEN 'failed'
+              WHEN provider_terminal_outcome = 'failed' OR ?2 = 'failed' THEN 'failed'
+              WHEN provider_terminal_outcome = 'canceled' OR ?2 = 'canceled' THEN 'canceled'
+              WHEN bridge_terminal_event = 'ended' THEN 'completed'
+              ELSE 'failed' END,
+            provider_terminal_outcome = CASE
+              WHEN provider_terminal_outcome IS NULL AND bridge_terminal_event IS NULL
+                AND ended_at IS NOT NULL THEN NULL
+              WHEN provider_terminal_outcome = 'failed' OR ?2 = 'failed' THEN 'failed'
+              WHEN provider_terminal_outcome = 'canceled' OR ?2 = 'canceled' THEN 'canceled'
+              ELSE 'completed' END,
+            provider_status = CASE
+              WHEN provider_terminal_outcome IS NULL AND bridge_terminal_event IS NULL
+                AND ended_at IS NOT NULL THEN provider_status
+              WHEN provider_terminal_outcome = 'failed' AND ?2 <> 'failed'
+                THEN provider_status
+              WHEN provider_terminal_outcome = 'canceled' AND ?2 = 'completed'
+                THEN provider_status
+              ELSE ?3 END,
+            vobiz_call_uuid = COALESCE(vobiz_call_uuid, ?4),
+            updated_at = CASE WHEN provider_terminal_outcome IS NULL
+              AND bridge_terminal_event IS NULL AND ended_at IS NOT NULL
+              THEN updated_at ELSE ?5 END,
+            ended_at = COALESCE(ended_at, ?5)
       WHERE id = ?1`,
-  ).bind(row.id, status, providerStatus, providerUUID, now).run();
+  ).bind(row.id, providerOutcome, providerStatus, providerUUID, now).run();
   if (!row.bridge_claimed_at) await bridgeAction(env, row, "cancel", fetcher);
   return callbackAcknowledged();
 }
@@ -1137,14 +1174,31 @@ export async function bridgeCallEvent(request, env, callID) {
     }
     return json(200, { ok: true });
   }
+  // A delayed terminal report can arrive after Hangup. The persisted provider
+  // outcome decides whether it can promote a provisional failure to success.
+  // Once the bridge reports failure, a delayed or repeated ended report cannot
+  // promote the call again.
   await env.DB.prepare(
     `UPDATE vobiz_pstn_calls
-        SET status = CASE WHEN ended_at IS NULL THEN ?2 ELSE status END,
-            summary = COALESCE(?3, summary),
+        SET status = CASE
+              WHEN ?2 = 'failed' THEN 'failed'
+              WHEN bridge_terminal_event = 'failed' THEN 'failed'
+              WHEN ?2 = 'ended' AND status <> 'canceled'
+                AND (provider_terminal_outcome = 'completed'
+                  OR (provider_terminal_outcome IS NULL AND ended_at IS NULL))
+                THEN 'completed'
+              WHEN ?2 = 'connected' AND ended_at IS NULL THEN 'connected'
+              ELSE status END,
+            bridge_terminal_event = CASE
+              WHEN ?2 = 'failed' THEN 'failed'
+              WHEN ?2 = 'ended' AND bridge_terminal_event IS NULL THEN 'ended'
+              ELSE bridge_terminal_event END,
+            summary = CASE WHEN ?2 IN ('ended', 'failed')
+              AND bridge_terminal_event IS NULL THEN ?3 ELSE summary END,
             updated_at = ?4,
-            ended_at = CASE WHEN ?2 IN ('completed', 'failed') THEN COALESCE(ended_at, ?4) ELSE ended_at END
+            ended_at = CASE WHEN ?2 IN ('ended', 'failed') THEN COALESCE(ended_at, ?4) ELSE ended_at END
       WHERE id = ?1`,
-  ).bind(row.id, status, summary, now).run();
+  ).bind(row.id, body.event, summary, now).run();
   return json(200, { ok: true });
 }
 
@@ -1252,7 +1306,9 @@ const worker = {
     const url = new URL(request.url);
     try {
       if (request.method === "GET" && url.pathname === "/health") {
-        await env.DB.prepare("SELECT id FROM vobiz_pstn_calls LIMIT 1").first();
+        await env.DB.prepare(
+          "SELECT id, bridge_terminal_event, provider_terminal_outcome FROM vobiz_pstn_calls LIMIT 1",
+        ).first();
         await env.DB.prepare("SELECT id FROM vobiz_inbound_calls LIMIT 1").first();
         await env.DB.prepare(
           "SELECT call_id, message, quarantined_at, quarantine_reason FROM vobiz_caller_notification_outbox LIMIT 1",

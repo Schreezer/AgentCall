@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { SELF } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import worker, { bridgeActionToken, createPstnCall, getPstnCall, getPstnProviderStatus,
+import worker, { bridgeActionToken, bridgeCallEvent, bridgeToken, createPstnCall, getPstnCall, getPstnProviderStatus,
   handleVobizCallback, reconcilePstnCall } from "../src/index.js";
 
 const AGENT = "test-hermes-token-32-chars-long-value";
@@ -186,6 +186,7 @@ describe("isolated Vobiz outbound relay", () => {
     expect((await SELF.fetch(await signedCallback(
       ringPath, "Ring", "12345678901234567893",
     ))).status).toBe(200);
+    const remoteRequestsBeforeAnswer = requests.length;
     const answered = await handleVobizCallback(
       callbackWithParameters(answerPath, [
         ["Event", "StartApp"], ["RequestUUID", PROVIDER_ID], ["Direction", "outbound"],
@@ -198,6 +199,18 @@ describe("isolated Vobiz outbound relay", () => {
     expect(xml).toContain('contentType="audio/x-l16;rate=16000"');
     expect(xml).toContain("wss://bridge.example/vobiz?token=");
     expect(xml).not.toContain(body.briefing);
+    expect(requests).toHaveLength(remoteRequestsBeforeAnswer);
+    const streamURL = new URL(xml.match(/<Stream[^>]*>([^<]+)<\/Stream>/)?.[1]);
+    const [streamPayload, streamSignature] = streamURL.searchParams.get("token").split(".");
+    const token = JSON.parse(new TextDecoder().decode(Uint8Array.from(
+      atob(streamPayload.replace(/-/g, "+").replace(/_/g, "/")),
+      (character) => character.charCodeAt(0))));
+    expect(token).toEqual({ v: 2, id: call.id, direction: "outbound",
+      exp: expect.any(Number), provider_call_id: PROVIDER_ID });
+    expect(await crypto.subtle.verify("HMAC", keyForToken, Uint8Array.from(
+      atob(streamSignature.replace(/-/g, "+").replace(/_/g, "/")),
+      (character) => character.charCodeAt(0)),
+    new TextEncoder().encode(streamPayload))).toBe(true);
 
     const bridgePath = `https://relay.example/v1/vobiz/bridge/calls/${call.id}`;
     expect((await SELF.fetch(bridgePath, { headers: { authorization: `Bearer ${AGENT}` } })).status).toBe(401);
@@ -224,6 +237,26 @@ describe("isolated Vobiz outbound relay", () => {
     const hungup = await SELF.fetch(await signedCallback(new URL(providerRequest.payload.hangup_url).pathname, "Hangup",
       "12345678901234567891"));
     expect(hungup.status).toBe(200);
+    expect(await (await getPstnCall(env, call.id)).json()).toMatchObject({ status: "completed",
+      provider_status: "hangup" });
+  });
+
+  it("fails health when the outbound terminal evidence migration is missing", async () => {
+    let probedColumns = false;
+    const missingMigrationEnv = { ...env, DB: {
+      prepare(query) {
+        if (query.includes("FROM vobiz_pstn_calls LIMIT 1")) {
+          probedColumns = query.includes("bridge_terminal_event") &&
+            query.includes("provider_terminal_outcome");
+          return { async first() { throw new Error("no such column: bridge_terminal_event"); } };
+        }
+        return env.DB.prepare(query);
+      },
+    } };
+    const health = await worker.fetch(new Request("https://relay.example/health"), missingMigrationEnv);
+    expect(probedColumns).toBe(true);
+    expect(health.status).toBe(500);
+    expect(await health.json()).toEqual({ error: "internal_error" });
   });
 
   it.each([
@@ -324,6 +357,20 @@ describe("isolated Vobiz outbound relay", () => {
       "/api/v1/Account/test-auth/Call/"]);
   });
 
+  it("keeps the inbound stream token at V1 and requires a provider ID for outbound V2", async () => {
+    const id = crypto.randomUUID();
+    const inbound = await bridgeToken(env.VOBIZ_BRIDGE_SECRET, { id, direction: "inbound" });
+    const payload = inbound.split(".")[0];
+    const decoded = JSON.parse(new TextDecoder().decode(Uint8Array.from(
+      atob(payload.replace(/-/g, "+").replace(/_/g, "/")),
+      (character) => character.charCodeAt(0))));
+    expect(decoded).toEqual({ v: 1, id, exp: expect.any(Number), direction: "inbound" });
+    await expect(bridgeToken(env.VOBIZ_BRIDGE_SECRET, { id, direction: "outbound" }))
+      .rejects.toThrow("provider_call_id_required");
+    await expect(bridgeToken(env.VOBIZ_BRIDGE_SECRET, { id, direction: "outbound",
+      vobiz_call_uuid: "not-a-uuid" })).rejects.toThrow("provider_call_id_required");
+  });
+
   it("marks unanswered calls failed and preserves a Codex bridge failure on later Hangup", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const noAnswerProviderID = crypto.randomUUID();
@@ -386,45 +433,363 @@ describe("isolated Vobiz outbound relay", () => {
     expect(third.status).toBe(201);
   });
 
-  it("hangs up and records failure if the Codex bridge becomes unavailable at answer time", async () => {
+  it("returns the prepared stream without an answer-time bridge request", async () => {
     const providerID = crypto.randomUUID();
     const first = await createPstnCall(callRequest("Say hello."), env, fakeFetchFor(providerID));
     expect(first.status).toBe(201);
     const call = await first.json();
     const answerPath = new URL(requests.at(-1).payload.answer_url).pathname;
     const callbackToken = answerPath.split("/").at(-1);
-    const unavailableFetch = async (input) => {
-      if (new URL(input).pathname.startsWith("/cancel/")) {
-        return Response.json({ ok: true, cancelled: true });
-      }
-      expect(new URL(input).pathname).toBe("/health");
-      return Response.json({ ok: true, codex_ready: true, runtime_ready: false });
+    let answerFetches = 0;
+    const unavailableFetch = async () => {
+      answerFetches += 1;
+      throw new Error("answer path must not depend on the bridge HTTP route");
     };
     const answered = await handleVobizCallback(unsignedCallback(answerPath, "StartApp", false,
       {}, providerID), env, "answer", call.id, callbackToken, unavailableFetch);
     expect(answered.status).toBe(200);
-    expect(await answered.text()).toContain("<Hangup/>");
-    expect((await (await getPstnCall(env, call.id)).json()).status).toBe("failed");
+    expect(await answered.text()).toContain("<Stream");
+    expect(answerFetches).toBe(0);
+    expect((await (await getPstnCall(env, call.id)).json()).status).toBe("connected");
   });
 
-  it("streams a prepared outbound call even while generic Codex capacity is reserved", async () => {
+  it("rejects a mismatched provider ID before minting an outbound stream token", async () => {
     const providerID = crypto.randomUUID();
     const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetchFor(providerID));
     expect(placed.status).toBe(201);
     const { id } = await placed.json();
     const answerPath = new URL(requests.at(-1).payload.answer_url).pathname;
     const callbackToken = answerPath.split("/").at(-1);
-    const preparedHealth = async (input) => {
-      expect(new URL(input).pathname).toBe("/health");
-      return Response.json({ ok: true, codex_ready: false, runtime_ready: true });
-    };
     const response = await handleVobizCallback(unsignedCallback(answerPath, "StartApp", false,
-      {}, providerID), env, "answer", id, callbackToken, preparedHealth);
-    expect(response.status).toBe(200);
-    const xml = await response.text();
-    expect(xml).toContain('contentType="audio/x-l16;rate=16000"');
-    expect(xml).toContain("wss://bridge.example/vobiz?token=");
-    expect((await (await getPstnCall(env, id)).json()).status).toBe("connected");
+      {}, crypto.randomUUID()), env, "answer", id, callbackToken, async () => {
+      throw new Error("mismatched callback must not call the bridge");
+    });
+    expect(response.status).toBe(403);
+    expect((await (await getPstnCall(env, id)).json()).status).toBe("queued");
+  });
+
+  it("accepts an outbound report after Hangup overtakes its background bridge claim", async () => {
+    const placed = await createPstnCall(callRequest("Ask why they called."), env, fakeFetch);
+    const { id } = await placed.json();
+    const providerRequest = requests.at(-1).payload;
+    const answerPath = new URL(providerRequest.answer_url).pathname;
+    const hangupPath = new URL(providerRequest.hangup_url).pathname;
+    const answer = await handleVobizCallback(unsignedCallback(answerPath, "StartApp"),
+      env, "answer", id, answerPath.split("/").at(-1), fakeFetch);
+    expect(await answer.text()).toContain("<Stream");
+    const hungup = await handleVobizCallback(unsignedCallback(hangupPath, "Hangup", false,
+      { CallStatus: "completed" }), env, "hangup", id, hangupPath.split("/").at(-1), fakeFetch);
+    expect(hungup.status).toBe(200);
+    expect(await (await getPstnCall(env, id)).json()).toMatchObject({ status: "failed",
+      provider_status: "completed" });
+    expect(await env.DB.prepare(
+      "SELECT bridge_terminal_event, provider_terminal_outcome FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(id).first()).toMatchObject({ bridge_terminal_event: null,
+      provider_terminal_outcome: "completed" });
+    expect((await SELF.fetch(`https://relay.example/v1/vobiz/bridge/calls/${id}/claim`, {
+      method: "POST", headers: { authorization: `Bearer ${BRIDGE}` },
+    })).status).toBe(409);
+    const lateReport = await SELF.fetch(`https://relay.example/v1/vobiz/bridge/calls/${id}/events`, {
+      method: "POST", headers: { authorization: `Bearer ${BRIDGE}`,
+        "content-type": "application/json" },
+      body: JSON.stringify({ event: "ended", transcript: [
+        { role: "user", text: "I called to ask about the appointment." },
+      ] }),
+    });
+    expect(lateReport.status).toBe(200);
+    expect(await (await getPstnCall(env, id)).json()).toMatchObject({ status: "completed",
+      provider_status: "completed", summary: "I called to ask about the appointment." });
+    expect(await env.DB.prepare(
+      "SELECT bridge_terminal_event, provider_terminal_outcome FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(id).first()).toMatchObject({ bridge_terminal_event: "ended",
+      provider_terminal_outcome: "completed" });
+  });
+
+  it("does not claim a successful call from Answer and a normal Hangup alone", async () => {
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+    const { id } = await placed.json();
+    const providerRequest = requests.at(-1).payload;
+    const answerPath = new URL(providerRequest.answer_url).pathname;
+    const hangupPath = new URL(providerRequest.hangup_url).pathname;
+    expect((await handleVobizCallback(unsignedCallback(answerPath, "StartApp"), env,
+      "answer", id, answerPath.split("/").at(-1), fakeFetch)).status).toBe(200);
+    expect((await handleVobizCallback(unsignedCallback(hangupPath, "Hangup", false,
+      { CallStatus: "completed", HangupCause: "NORMAL_CLEARING" }), env, "hangup", id,
+    hangupPath.split("/").at(-1), fakeFetch)).status).toBe(200);
+    expect(await (await getPstnCall(env, id)).json()).toMatchObject({ status: "failed",
+      provider_status: "completed:NORMAL_CLEARING" });
+    expect(await env.DB.prepare(
+      "SELECT bridge_terminal_event, provider_terminal_outcome FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(id).first()).toMatchObject({ bridge_terminal_event: null,
+      provider_terminal_outcome: "completed" });
+  });
+
+  it("requires the bridge terminal report even when the bridge claimed the call", async () => {
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+    const { id } = await placed.json();
+    const providerRequest = requests.at(-1).payload;
+    const answerPath = new URL(providerRequest.answer_url).pathname;
+    const hangupPath = new URL(providerRequest.hangup_url).pathname;
+    expect((await handleVobizCallback(unsignedCallback(answerPath, "StartApp"), env,
+      "answer", id, answerPath.split("/").at(-1), fakeFetch)).status).toBe(200);
+    expect((await SELF.fetch(`https://relay.example/v1/vobiz/bridge/calls/${id}/claim`, {
+      method: "POST", headers: { authorization: `Bearer ${BRIDGE}` },
+    })).status).toBe(200);
+    expect((await handleVobizCallback(unsignedCallback(hangupPath, "Hangup", false,
+      { CallStatus: "completed" }), env, "hangup", id, hangupPath.split("/").at(-1),
+    fakeFetch)).status).toBe(200);
+    expect((await (await getPstnCall(env, id)).json()).status).toBe("failed");
+    expect((await SELF.fetch(`https://relay.example/v1/vobiz/bridge/calls/${id}/events`, {
+      method: "POST", headers: { authorization: `Bearer ${BRIDGE}`,
+        "content-type": "application/json" },
+      body: JSON.stringify({ event: "ended", summary: "The caller heard the greeting." }),
+    })).status).toBe(200);
+    expect((await (await getPstnCall(env, id)).json()).status).toBe("completed");
+  });
+
+  it("lets a late bridge failure keep a normal provider Hangup failed", async () => {
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+    const { id } = await placed.json();
+    const providerRequest = requests.at(-1).payload;
+    const answerPath = new URL(providerRequest.answer_url).pathname;
+    const hangupPath = new URL(providerRequest.hangup_url).pathname;
+    expect((await handleVobizCallback(unsignedCallback(answerPath, "StartApp"),
+      env, "answer", id, answerPath.split("/").at(-1), fakeFetch)).status).toBe(200);
+    expect((await handleVobizCallback(unsignedCallback(hangupPath, "Hangup", false,
+      { CallStatus: "completed" }), env, "hangup", id, hangupPath.split("/").at(-1),
+    fakeFetch)).status).toBe(200);
+    expect((await (await getPstnCall(env, id)).json()).status).toBe("failed");
+    expect((await SELF.fetch(`https://relay.example/v1/vobiz/bridge/calls/${id}/events`, {
+      method: "POST", headers: { authorization: `Bearer ${BRIDGE}`,
+        "content-type": "application/json" },
+      body: JSON.stringify({ event: "failed", detail: "Opening speech timed out" }),
+    })).status).toBe(200);
+    expect((await (await getPstnCall(env, id)).json()).status).toBe("failed");
+    expect(await env.DB.prepare(
+      "SELECT bridge_terminal_event, provider_terminal_outcome FROM vobiz_pstn_calls WHERE id = ?1",
+    ).bind(id).first()).toMatchObject({ bridge_terminal_event: "failed",
+      provider_terminal_outcome: "completed" });
+    expect((await SELF.fetch(`https://relay.example/v1/vobiz/bridge/calls/${id}/events`, {
+      method: "POST", headers: { authorization: `Bearer ${BRIDGE}`,
+        "content-type": "application/json" },
+      body: JSON.stringify({ event: "ended", summary: "Delayed duplicate" }),
+    })).status).toBe(200);
+    expect(await (await getPstnCall(env, id)).json()).toMatchObject({ status: "failed",
+      summary: null });
+  });
+
+  it("keeps the first terminal summary when a duplicate bridge report arrives", async () => {
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+    const { id } = await placed.json();
+    const providerRequest = requests.at(-1).payload;
+    const answerPath = new URL(providerRequest.answer_url).pathname;
+    expect((await handleVobizCallback(unsignedCallback(answerPath, "StartApp"), env,
+      "answer", id, answerPath.split("/").at(-1), fakeFetch)).status).toBe(200);
+    const report = (summary) => SELF.fetch(
+      `https://relay.example/v1/vobiz/bridge/calls/${id}/events`, {
+        method: "POST", headers: { authorization: `Bearer ${BRIDGE}`,
+          "content-type": "application/json" },
+        body: JSON.stringify({ event: "ended", summary }),
+      });
+    expect((await report("The first call summary.")).status).toBe(200);
+    expect((await report("A conflicting duplicate summary.")).status).toBe(200);
+    expect(await (await getPstnCall(env, id)).json()).toMatchObject({ status: "completed",
+      summary: "The first call summary.", bridge_terminal_event: "ended" });
+  });
+
+  it("lets provider media failure override an earlier successful bridge report", async () => {
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+    const { id } = await placed.json();
+    const providerRequest = requests.at(-1).payload;
+    const answerPath = new URL(providerRequest.answer_url).pathname;
+    const hangupPath = new URL(providerRequest.hangup_url).pathname;
+    expect((await handleVobizCallback(unsignedCallback(answerPath, "StartApp"), env,
+      "answer", id, answerPath.split("/").at(-1), fakeFetch)).status).toBe(200);
+    expect((await SELF.fetch(`https://relay.example/v1/vobiz/bridge/calls/${id}/events`, {
+      method: "POST", headers: { authorization: `Bearer ${BRIDGE}`,
+        "content-type": "application/json" },
+      body: JSON.stringify({ event: "ended", summary: "A greeting played." }),
+    })).status).toBe(200);
+    expect((await (await getPstnCall(env, id)).json()).status).toBe("completed");
+    expect((await handleVobizCallback(unsignedCallback(hangupPath, "Hangup", false,
+      { CallStatus: "completed", HangupCause: "MEDIA_TIMEOUT" }), env, "hangup", id,
+    hangupPath.split("/").at(-1), fakeFetch)).status).toBe(200);
+    expect(await (await getPstnCall(env, id)).json()).toMatchObject({ status: "failed",
+      provider_terminal_outcome: "failed", bridge_terminal_event: "ended",
+      provider_status: "completed:MEDIA_TIMEOUT" });
+    expect((await handleVobizCallback(unsignedCallback(hangupPath, "Hangup", false,
+      { CallStatus: "completed", HangupCause: "NORMAL_CLEARING" }), env, "hangup", id,
+    hangupPath.split("/").at(-1), fakeFetch)).status).toBe(200);
+    expect(await (await getPstnCall(env, id)).json()).toMatchObject({ status: "failed",
+      provider_status: "completed:MEDIA_TIMEOUT", provider_terminal_outcome: "failed" });
+  });
+
+  it("keeps an unanswered owner-canceled call canceled", async () => {
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+    const { id } = await placed.json();
+    const hangupPath = new URL(requests.at(-1).payload.hangup_url).pathname;
+    expect((await handleVobizCallback(unsignedCallback(hangupPath, "Hangup", false,
+      { CallStatus: "canceled", HangupCause: "ORIGINATOR_CANCEL" }), env, "hangup", id,
+    hangupPath.split("/").at(-1), fakeFetch)).status).toBe(200);
+    expect(await (await getPstnCall(env, id)).json()).toMatchObject({ status: "canceled",
+      provider_terminal_outcome: "canceled", bridge_terminal_event: null });
+    expect((await handleVobizCallback(unsignedCallback(hangupPath, "Hangup", false,
+      { CallStatus: "completed" }), env, "hangup", id, hangupPath.split("/").at(-1),
+    fakeFetch)).status).toBe(200);
+    expect((await (await getPstnCall(env, id)).json()).status).toBe("canceled");
+  });
+
+  it.each([
+    ["completed", "completed:NORMAL_CLEARING", "failed", "MEDIA_TIMEOUT"],
+    ["canceled", "canceled:ORIGINATOR_CANCEL", "completed", "NORMAL_CLEARING"],
+  ])("preserves a legacy %s row without terminal evidence on duplicate Hangup",
+    async (legacyStatus, legacyProviderStatus, callbackStatus, callbackCause) => {
+      const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+      const { id } = await placed.json();
+      const hangupPath = new URL(requests.at(-1).payload.hangup_url).pathname;
+      const endedAt = Date.now() - 1_000;
+      await env.DB.prepare(
+        `UPDATE vobiz_pstn_calls SET status = ?2, provider_status = ?3,
+          ended_at = ?4 WHERE id = ?1`,
+      ).bind(id, legacyStatus, legacyProviderStatus, endedAt).run();
+      expect((await handleVobizCallback(unsignedCallback(hangupPath, "Hangup", false,
+        { CallStatus: callbackStatus, HangupCause: callbackCause }), env, "hangup", id,
+      hangupPath.split("/").at(-1), fakeFetch)).status).toBe(200);
+      expect(await (await getPstnCall(env, id)).json()).toMatchObject({ status: legacyStatus,
+        provider_status: legacyProviderStatus, provider_terminal_outcome: null,
+        bridge_terminal_event: null, ended_at: endedAt });
+    });
+
+  it.each(["bridge failure before provider cancel", "provider cancel before bridge failure"])(
+    "keeps an authenticated %s as failed", async (ordering) => {
+      const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+      const { id } = await placed.json();
+      const hangupPath = new URL(requests.at(-1).payload.hangup_url).pathname;
+      const failedReport = () => SELF.fetch(
+        `https://relay.example/v1/vobiz/bridge/calls/${id}/events`, {
+          method: "POST", headers: { authorization: `Bearer ${BRIDGE}`,
+            "content-type": "application/json" },
+          body: JSON.stringify({ event: "failed", detail: "Voice session unavailable" }),
+        });
+      const canceledHangup = () => handleVobizCallback(unsignedCallback(hangupPath, "Hangup", false,
+        { CallStatus: "canceled", HangupCause: "ORIGINATOR_CANCEL" }), env, "hangup", id,
+      hangupPath.split("/").at(-1), fakeFetch);
+      if (ordering === "bridge failure before provider cancel") {
+        expect((await failedReport()).status).toBe(200);
+        expect((await canceledHangup()).status).toBe(200);
+      } else {
+        expect((await canceledHangup()).status).toBe(200);
+        expect((await (await getPstnCall(env, id)).json()).status).toBe("canceled");
+        expect((await failedReport()).status).toBe(200);
+        expect((await canceledHangup()).status).toBe(200);
+      }
+      expect(await (await getPstnCall(env, id)).json()).toMatchObject({ status: "failed",
+        provider_terminal_outcome: "canceled", bridge_terminal_event: "failed" });
+    });
+
+  it("does not let a stale Hangup row overwrite a concurrent bridge failure", async () => {
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+    const { id } = await placed.json();
+    const providerRequest = requests.at(-1).payload;
+    const answerPath = new URL(providerRequest.answer_url).pathname;
+    const hangupPath = new URL(providerRequest.hangup_url).pathname;
+    expect((await handleVobizCallback(unsignedCallback(answerPath, "StartApp"),
+      env, "answer", id, answerPath.split("/").at(-1), fakeFetch)).status).toBe(200);
+    const racedEnv = { ...env, DB: {
+      prepare(query) {
+        const statement = env.DB.prepare(query);
+        if (query !== "SELECT * FROM vobiz_pstn_calls WHERE id = ?1") return statement;
+        return { bind(...values) {
+          const bound = statement.bind(...values);
+          return { async first() {
+            const stale = await bound.first();
+            const failure = await SELF.fetch(
+              `https://relay.example/v1/vobiz/bridge/calls/${id}/events`, {
+                method: "POST", headers: { authorization: `Bearer ${BRIDGE}`,
+                  "content-type": "application/json" },
+                body: JSON.stringify({ event: "failed", detail: "Opening speech timed out" }),
+              });
+            expect(failure.status).toBe(200);
+            return stale;
+          } };
+        } };
+      },
+    } };
+    expect((await handleVobizCallback(unsignedCallback(hangupPath, "Hangup", false,
+      { CallStatus: "completed" }), racedEnv, "hangup", id, hangupPath.split("/").at(-1),
+    fakeFetch)).status).toBe(200);
+    expect((await (await getPstnCall(env, id)).json()).status).toBe("failed");
+  });
+
+  it("keeps an ended bridge report successful when Hangup read a stale row", async () => {
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+    const { id } = await placed.json();
+    const providerRequest = requests.at(-1).payload;
+    const answerPath = new URL(providerRequest.answer_url).pathname;
+    const hangupPath = new URL(providerRequest.hangup_url).pathname;
+    expect((await handleVobizCallback(unsignedCallback(answerPath, "StartApp"), env,
+      "answer", id, answerPath.split("/").at(-1), fakeFetch)).status).toBe(200);
+    const racedEnv = { ...env, DB: {
+      prepare(query) {
+        const statement = env.DB.prepare(query);
+        if (query !== "SELECT * FROM vobiz_pstn_calls WHERE id = ?1") return statement;
+        return { bind(...values) {
+          const bound = statement.bind(...values);
+          return { async first() {
+            const stale = await bound.first();
+            const ended = await SELF.fetch(
+              `https://relay.example/v1/vobiz/bridge/calls/${id}/events`, {
+                method: "POST", headers: { authorization: `Bearer ${BRIDGE}`,
+                  "content-type": "application/json" },
+                body: JSON.stringify({ event: "ended", summary: "Greeting delivered." }),
+              });
+            expect(ended.status).toBe(200);
+            return stale;
+          } };
+        } };
+      },
+    } };
+    expect((await handleVobizCallback(unsignedCallback(hangupPath, "Hangup", false,
+      { CallStatus: "completed" }), racedEnv, "hangup", id, hangupPath.split("/").at(-1),
+    fakeFetch)).status).toBe(200);
+    expect(await (await getPstnCall(env, id)).json()).toMatchObject({ status: "completed",
+      provider_terminal_outcome: "completed", bridge_terminal_event: "ended" });
+  });
+
+  it("does not promote a reported provider media failure after a stale bridge read", async () => {
+    const placed = await createPstnCall(callRequest("Say hello."), env, fakeFetch);
+    const { id } = await placed.json();
+    const providerRequest = requests.at(-1).payload;
+    const answerPath = new URL(providerRequest.answer_url).pathname;
+    const hangupPath = new URL(providerRequest.hangup_url).pathname;
+    expect((await handleVobizCallback(unsignedCallback(answerPath, "StartApp"), env,
+      "answer", id, answerPath.split("/").at(-1), fakeFetch)).status).toBe(200);
+    const racedEnv = { ...env, DB: {
+      prepare(query) {
+        const statement = env.DB.prepare(query);
+        if (query !== "SELECT * FROM vobiz_pstn_calls WHERE id = ?1") return statement;
+        return { bind(...values) {
+          const bound = statement.bind(...values);
+          return { async first() {
+            const stale = await bound.first();
+            const hungup = await handleVobizCallback(unsignedCallback(hangupPath, "Hangup", false,
+              { CallStatus: "completed", HangupCause: "MEDIA_TIMEOUT" }), env, "hangup", id,
+            hangupPath.split("/").at(-1), fakeFetch);
+            expect(hungup.status).toBe(200);
+            return stale;
+          } };
+        } };
+      },
+    } };
+    const report = await bridgeCallEvent(new Request(
+      `https://relay.example/v1/vobiz/bridge/calls/${id}/events`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ event: "ended", summary: "A partial greeting played." }),
+      }), racedEnv, id);
+    expect(report.status).toBe(200);
+    expect(await (await getPstnCall(env, id)).json()).toMatchObject({ status: "failed",
+      provider_status: "completed:MEDIA_TIMEOUT", provider_terminal_outcome: "failed",
+      bridge_terminal_event: "ended" });
   });
 
   it("expires interrupted preparation and blocks its suspended request from dialing", async () => {

@@ -51,7 +51,14 @@ MAX_TOKEN_SECONDS = 300
 CODEX_REASONING_MODEL = "gpt-6-sol"
 CALL_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$")
 STREAM_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$")
+PROVIDER_CALL_ID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 NUMBER_SEQUENCE_PATTERN = re.compile(r"(?<!\d)(?:\d[ .-]?){3,}\d(?!\d)")
+SENSITIVE_SPEECH_PATTERN = re.compile(
+    r"\b(?:password|passcode|pin|otp|secret|token|api[ -]?key|bearer)\b"
+    r"\s*(?:(?:is|was|equals)\s+|[:=]\s*)?[^\s|]{1,80}", re.I,
+)
 E164_NUMBER = re.compile(r"^\+[1-9]\d{6,14}$")
 AI_DISCLOSURE = re.compile(
     r"\b(?:I am|I'm|this is)(?:\s+(?:your|an?|the|Hermes)){0,3}"
@@ -138,6 +145,18 @@ NOTIFICATION_POLL_SECONDS = 30
 TERMINAL_EVENT_POLL_SECONDS = 30
 MAX_TERMINAL_SPOOL_ENTRIES = 256
 MAX_TERMINAL_SPOOL_BYTES = 4096
+OUTBOUND_FAILURE_FALLBACK = "voice_stream_failed"
+OUTBOUND_FAILURE_CODES = frozenset({
+    OUTBOUND_FAILURE_FALLBACK,
+    "stream_ended_before_first_audio",
+    "codex_realtime_error",
+    "codex_output_ended",
+    "codex_opening_audio_timeout",
+    "vobiz_connecting_tone_clear_timeout",
+    "call_time_limit",
+    "prepared_voice_unavailable",
+    "vobiz_call_id_mismatch",
+})
 CONNECTING_TONE_RATE = 24000
 CONNECTING_TONE_FRAME_SECONDS = 0.05
 CONNECTING_TONE_CYCLE_FRAMES = 60
@@ -247,6 +266,20 @@ def bounded_inbound_report(transcript: list[dict]) -> str:
     return ("Caller said: " + " | ".join(caller_turns))[:500]
 
 
+def bounded_outbound_report(transcript: list[dict]) -> str:
+    """Keep only bounded, digit-redacted recipient speech for the owner."""
+    report = bounded_inbound_report(transcript)
+    if report == "No caller message captured.":
+        return "No recipient message captured."
+    report = SENSITIVE_SPEECH_PATTERN.sub("[sensitive detail omitted]", report)
+    return report.replace("Caller said: ", "Recipient said: ", 1)
+
+
+def safe_outbound_failure_code(error: Exception) -> str:
+    detail = str(error)
+    return detail if detail in OUTBOUND_FAILURE_CODES else OUTBOUND_FAILURE_FALLBACK
+
+
 def validated_inbound_notification(value: object) -> str:
     """Accept only the Worker's bounded, clearly attributed owner alert."""
     if value == INBOUND_NOTIFICATION:
@@ -278,8 +311,21 @@ def validated_spooled_inbound_report(value: object) -> str:
     return value
 
 
-class InboundTerminalEventSpool:
-    """Store the first bounded inbound report until the Worker accepts it."""
+def validated_spooled_outbound_report(value: object) -> str:
+    if (
+        not isinstance(value, str) or len(value) > 500
+        or not (value == "No recipient message captured." or value.startswith("Recipient said: "))
+        or value != unicodedata.normalize("NFC", value)
+        or any(character.isdigit() or unicodedata.category(character) in {
+            "Cc", "Cf", "Cs", "Zl", "Zp",
+        } for character in value)
+    ):
+        raise RuntimeError("terminal_spool_file_invalid")
+    return value
+
+
+class TerminalEventSpool:
+    """Store the first bounded terminal event until the Worker accepts it."""
 
     def __init__(self, directory: str | pathlib.Path):
         self.directory = pathlib.Path(directory).expanduser()
@@ -302,6 +348,14 @@ class InboundTerminalEventSpool:
             raise ValueError("invalid_call_id")
         return self.directory / f"{call_id}.json"
 
+    def assert_capacity(self, call_id: str) -> None:
+        """Fail prewarm before dialing when its terminal event cannot be saved."""
+        target = self._path(call_id)
+        if target.exists() or target.is_symlink():
+            raise RuntimeError("terminal_spool_call_already_terminal")
+        if len(list(self.directory.iterdir())) >= MAX_TERMINAL_SPOOL_ENTRIES:
+            raise RuntimeError("terminal_spool_full")
+
     def _read(self, path: pathlib.Path) -> dict:
         metadata = path.lstat()
         if (
@@ -312,22 +366,63 @@ class InboundTerminalEventSpool:
         ):
             raise RuntimeError("terminal_spool_file_invalid")
         record = json.loads(path.read_text(encoding="utf-8"))
-        if (
-            not isinstance(record, dict) or record.get("v") != 1
-            or record.get("call_id") != path.stem
-        ):
+        if not isinstance(record, dict) or record.get("call_id") != path.stem or not CALL_ID.fullmatch(path.stem):
             raise RuntimeError("terminal_spool_file_invalid")
-        validated_spooled_inbound_report(record.get("inbound_report"))
+        if type(record.get("v")) is int and record["v"] == 1:
+            if set(record) != {"v", "call_id", "inbound_report"}:
+                raise RuntimeError("terminal_spool_file_invalid")
+            validated_spooled_inbound_report(record.get("inbound_report"))
+        elif type(record.get("v")) is int and record["v"] == 2:
+            if record.get("direction") != "outbound":
+                raise RuntimeError("terminal_spool_file_invalid")
+            if record.get("event") == "failed":
+                if set(record) != {"v", "call_id", "direction", "event", "detail"} \
+                        or not isinstance(record.get("detail"), str) \
+                        or record["detail"] not in OUTBOUND_FAILURE_CODES:
+                    raise RuntimeError("terminal_spool_file_invalid")
+            elif record.get("event") == "ended":
+                if set(record) != {"v", "call_id", "direction", "event", "summary"}:
+                    raise RuntimeError("terminal_spool_file_invalid")
+                validated_spooled_outbound_report(record.get("summary"))
+            else:
+                raise RuntimeError("terminal_spool_file_invalid")
+        else:
+            raise RuntimeError("terminal_spool_file_invalid")
         return record
 
     def persist(self, call_id: str, report: str) -> dict:
+        validated_spooled_inbound_report(report)
+        record = self._persist_record(
+            {"v": 1, "call_id": call_id, "inbound_report": report}
+        )
+        if record["v"] != 1:
+            raise RuntimeError("terminal_spool_direction_mismatch")
+        return record
+
+    def persist_outbound(self, call_id: str, event: str, *, detail: str = "",
+                         summary: str = "") -> dict:
+        if event == "failed" and isinstance(detail, str) \
+                and detail in OUTBOUND_FAILURE_CODES and not summary:
+            record = {"v": 2, "call_id": call_id, "direction": "outbound",
+                      "event": "failed", "detail": detail}
+        elif event == "ended" and not detail:
+            validated_spooled_outbound_report(summary)
+            record = {"v": 2, "call_id": call_id, "direction": "outbound",
+                      "event": "ended", "summary": summary}
+        else:
+            raise ValueError("invalid_outbound_terminal_event")
+        stored = self._persist_record(record)
+        if stored["v"] != 2:
+            raise RuntimeError("terminal_spool_direction_mismatch")
+        return stored
+
+    def _persist_record(self, record: dict) -> dict:
+        call_id = record["call_id"]
         target = self._path(call_id)
         if target.exists() or target.is_symlink():
             return self._read(target)
-        validated_spooled_inbound_report(report)
         if len(list(self.directory.iterdir())) >= MAX_TERMINAL_SPOOL_ENTRIES:
             raise RuntimeError("terminal_spool_full")
-        record = {"v": 1, "call_id": call_id, "inbound_report": report[:500]}
         payload = json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(payload) > MAX_TERMINAL_SPOOL_BYTES:
             raise RuntimeError("terminal_spool_event_too_large")
@@ -337,7 +432,12 @@ class InboundTerminalEventSpool:
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, target)
+            try:
+                # Linking a complete fsynced temp file is atomic and never
+                # overwrites an earlier terminal outcome for the same call.
+                os.link(temporary, target)
+            except FileExistsError:
+                return self._read(target)
             self._sync_directory()
         finally:
             if os.path.exists(temporary):
@@ -363,6 +463,10 @@ class InboundTerminalEventSpool:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+
+# Older callers and persisted v1 inbound files retain their original API.
+InboundTerminalEventSpool = TerminalEventSpool
 
 
 def enabled_flag(value: str) -> bool:
@@ -393,14 +497,24 @@ def verify_stream_token(token: str, secret: str, now: int | None = None) -> dict
         payload = json.loads(_b64url_decode(payload_part))
     except (UnicodeError, ValueError, TypeError, json.JSONDecodeError) as error:
         raise ValueError("invalid_token") from error
-    if not isinstance(payload, dict) or set(payload) != {"v", "id", "exp", "direction"}:
+    if not isinstance(payload, dict):
         raise ValueError("invalid_token")
     issued_now = int(time.time()) if now is None else now
-    if payload["v"] != 1 or payload["direction"] not in {"inbound", "outbound"}:
+    if type(payload.get("v")) is not int or (
+        payload["v"] == 1
+        and (set(payload) != {"v", "id", "exp", "direction"}
+             or payload.get("direction") != "inbound")
+    ) or (
+        payload["v"] == 2
+        and (set(payload) != {"v", "id", "exp", "direction", "provider_call_id"}
+             or payload.get("direction") != "outbound"
+             or not isinstance(payload.get("provider_call_id"), str)
+             or not PROVIDER_CALL_ID.fullmatch(payload["provider_call_id"]))
+    ) or payload["v"] not in {1, 2}:
         raise ValueError("invalid_token")
     if not isinstance(payload["id"], str) or not CALL_ID.fullmatch(payload["id"]):
         raise ValueError("invalid_token")
-    if type(payload["exp"]) is not int or not issued_now <= payload["exp"] <= issued_now + MAX_TOKEN_SECONDS:
+    if type(payload.get("exp")) is not int or not issued_now <= payload["exp"] <= issued_now + MAX_TOKEN_SECONDS:
         raise ValueError("invalid_token")
     return payload
 
@@ -826,14 +940,15 @@ class CodexPSTNSession:
         self._write_lock = connecting_tone.write_lock
 
     async def activate(self) -> None:
-        """Release the opening only after Vobiz has answered and claimed it."""
+        """Release the opening only after the authenticated Vobiz stream attaches."""
         if not self._prepared or not self.socket or not self.stream_id:
             raise RuntimeError("codex_session_not_prepared")
         if self._activated:
             raise RuntimeError("codex_session_already_activated")
         if self.realtime_error.is_set() or not self.output_task or self.output_task.done():
             raise RuntimeError("codex_realtime_unavailable")
-        # The answered stream is already authenticated, claimed, and attached.
+        # The answered stream is authenticated and attached. For prepared
+        # outbound calls the Worker claim runs independently of the audio gate.
         # Open the RTP gate before the request so the model's first syllable
         # cannot be dropped if speech starts before the request acknowledgement.
         self._activated = True
@@ -1026,7 +1141,7 @@ class VobizCodexBridge:
         self.allow_inbound = allow_inbound
         self.caller_relay_url = caller_relay_url
         self.caller_agent_token = caller_agent_token
-        self.terminal_spool = InboundTerminalEventSpool(spool_dir) if spool_dir else None
+        self.terminal_spool = TerminalEventSpool(spool_dir) if spool_dir else None
         self.credentials = HermesCodexCredentials()
         self.app: AppServer | None = None
         self.app_lock = asyncio.Lock()
@@ -1117,6 +1232,15 @@ class VobizCodexBridge:
             raise ValueError("bridge_busy")
         if payload["direction"] == "inbound" and not self.allow_inbound:
             raise ValueError("inbound_not_enabled")
+        if payload["v"] == 2:
+            if self.terminal_spool is None:
+                raise ValueError("terminal_spool_unavailable")
+            record = self.prepared_calls.get(call_id)
+            if (
+                record is None or not record.task.done()
+                or record.task.cancelled() or record.task.exception() is not None
+            ):
+                raise ValueError("prewarm_missing")
         if call_id in self.used_tokens or call_id in self.active_calls:
             raise ValueError("replayed_stream_token")
         self.used_tokens[call_id] = payload["exp"]
@@ -1147,6 +1271,8 @@ class VobizCodexBridge:
             raise
 
     async def prepare_call(self, call_id: str) -> None:
+        if self.terminal_spool is None:
+            raise RuntimeError("terminal_spool_unavailable")
         async with self.prepare_lock:
             if self.active_calls:
                 raise ValueError("bridge_busy")
@@ -1154,6 +1280,7 @@ class VobizCodexBridge:
             if record is None:
                 if self.prepared_calls:
                     raise ValueError("bridge_busy")
+                self.terminal_spool.assert_capacity(call_id)
                 record = PreparedCall(asyncio.create_task(self._create_prepared_session(call_id)))
                 self.prepared_calls[call_id] = record
                 record.expiry_task = asyncio.create_task(self._expire_prepared(call_id, record))
@@ -1234,6 +1361,28 @@ class VobizCodexBridge:
         )
         if status != 200 or not isinstance(data, dict) or data.get("ok") is not True:
             raise RuntimeError("bridge_claim_rejected")
+
+    async def claim_remote_with_retries(self, call_id: str) -> bool:
+        """Record the bridge claim without holding answered audio behind HTTPS."""
+        for attempt in range(3):
+            try:
+                await self.claim_remote(call_id)
+                return True
+            except Exception as error:
+                if attempt == 2:
+                    print(
+                        f"[caller vobiz] background claim failed: {type(error).__name__}",
+                        file=sys.stderr,
+                    )
+                    return False
+                await asyncio.sleep(0.25 * 3**attempt)
+        return False
+
+    async def report_connected_after_claim(self, call_id: str,
+                                           claim_task: asyncio.Task) -> bool:
+        if not await claim_task:
+            return False
+        return await self.report(call_id, "connected")
 
     async def report(self, call_id: str, event: str, **extra) -> bool:
         for attempt in range(3):
@@ -1335,15 +1484,29 @@ class VobizCodexBridge:
             return 0
         delivered = 0
         for record in self.terminal_spool.pending()[:max_items]:
-            call_id = record["call_id"]
-            report = record["inbound_report"]
-            if not await self.report(call_id, "ended", inbound_report=report, summary=report):
-                continue
-            self.terminal_spool.remove(call_id)
-            delivered += 1
-            if self.caller_relay_url:
-                await self.drain_notifications()
+            if await self.deliver_terminal_record(record):
+                delivered += 1
         return delivered
+
+    async def deliver_terminal_record(self, record: dict) -> bool:
+        if not self.terminal_spool:
+            raise RuntimeError("terminal_spool_unavailable")
+        call_id = record["call_id"]
+        if record["v"] == 1:
+            report = record["inbound_report"]
+            delivered = await self.report(
+                call_id, "ended", inbound_report=report, summary=report,
+            )
+        elif record["event"] == "failed":
+            delivered = await self.report(call_id, "failed", detail=record["detail"])
+        else:
+            delivered = await self.report(call_id, "ended", summary=record["summary"])
+        if not delivered:
+            return False
+        self.terminal_spool.remove(call_id)
+        if record["v"] == 1 and self.caller_relay_url:
+            await self.drain_notifications()
+        return True
 
     async def terminal_event_loop(self) -> None:
         while True:
@@ -1357,21 +1520,24 @@ class VobizCodexBridge:
             await asyncio.sleep(TERMINAL_EVENT_POLL_SECONDS)
 
     async def finish_call(self, call_id: str, direction: str, transcript: list[dict]) -> None:
+        if not self.terminal_spool:
+            raise RuntimeError("terminal_spool_unavailable")
         if direction == "inbound":
             report = bounded_inbound_report(transcript)
-            if not self.terminal_spool:
-                raise RuntimeError("terminal_spool_unavailable")
             record = self.terminal_spool.persist(call_id, report)
-            report = record["inbound_report"]
-            reported = await self.report(
-                call_id, "ended", inbound_report=report, summary=report,
+        elif direction == "outbound":
+            record = self.terminal_spool.persist_outbound(
+                call_id, "ended", summary=bounded_outbound_report(transcript)
             )
-            if reported:
-                self.terminal_spool.remove(call_id)
-                if self.caller_relay_url:
-                    await self.drain_notifications()
-            return
-        await self.report(call_id, "ended", transcript=transcript[:20])
+        else:
+            raise ValueError("invalid_call_direction")
+        await self.deliver_terminal_record(record)
+
+    async def fail_outbound_call(self, call_id: str, detail: str) -> None:
+        if not self.terminal_spool:
+            raise RuntimeError("terminal_spool_unavailable")
+        record = self.terminal_spool.persist_outbound(call_id, "failed", detail=detail)
+        await self.deliver_terminal_record(record)
 
     async def process_request(self, connection, request):
         path = urllib.parse.urlsplit(request.path)
@@ -1421,6 +1587,14 @@ class VobizCodexBridge:
             return connection.respond(401, "Unauthorized\n")
         if payload["direction"] == "inbound" and not self.allow_inbound:
             return connection.respond(403, "Inbound disabled\n")
+        if payload["v"] == 2:
+            record = self.prepared_calls.get(payload["id"])
+            if (
+                self.terminal_spool is None or record is None or not record.task.done()
+                or record.task.cancelled() or record.task.exception() is not None
+                or not self.runtime_ready
+            ):
+                return connection.respond(503, "Prepared voice unavailable\n")
         return None
 
     async def handle(self, socket) -> None:
@@ -1433,6 +1607,7 @@ class VobizCodexBridge:
             await socket.close(code=1008, reason="unauthorized")
             return
         call_id = payload["id"]
+        prepared_outbound = payload["v"] == 2
         prepared_record = self.prepared_calls.pop(call_id, None)
         if prepared_record and prepared_record.expiry_task:
             prepared_record.expiry_task.cancel()
@@ -1442,8 +1617,11 @@ class VobizCodexBridge:
         connecting_tone = None
         error_watcher = None
         deadline_task = None
+        claim_task = None
+        connected_report_task = None
         connected = False
         failed = False
+        failed_detail = ""
         try:
             first = json.loads(await asyncio.wait_for(socket.recv(), timeout=10))
             start = first.get("start") if first.get("event") == "start" else None
@@ -1456,6 +1634,8 @@ class VobizCodexBridge:
                 raise RuntimeError("vobiz_stream_id_invalid")
             if not isinstance(vobiz_call_id, str) or not STREAM_ID.fullmatch(vobiz_call_id):
                 raise RuntimeError("vobiz_call_id_invalid")
+            if prepared_outbound and vobiz_call_id != payload["provider_call_id"]:
+                raise RuntimeError("vobiz_call_id_mismatch")
             if not isinstance(media_format, dict):
                 raise RuntimeError("vobiz_media_format_missing")
             encoding = media_format.get("encoding")
@@ -1466,14 +1646,34 @@ class VobizCodexBridge:
                 raise RuntimeError("vobiz_media_format_unsupported")
             answered_at = time.monotonic()
             # The signed WebSocket token and start frame have been checked.
-            # Cover even the Worker context lookup with paced in-call audio.
             connecting_tone = CallConnectingTone(socket, stream_id, self.l16_endian)
             connecting_tone.start()
-            context = await self.context(call_id, payload["direction"])
-            if context.get("vobiz_call_id") and context["vobiz_call_id"] != vobiz_call_id:
-                raise RuntimeError("vobiz_call_id_mismatch")
-            if not context.get("vobiz_call_id"):
-                raise RuntimeError("vobiz_call_id_unbound")
+            if prepared_outbound:
+                if not prepared_record:
+                    raise RuntimeError("prewarm_missing")
+                session = prepared_record.task.result()
+                context = session.context
+                if (
+                    not self.runtime_ready or session.app is not self.app
+                    or context.get("id") != call_id
+                    or context.get("direction") != "outbound"
+                    or context.get("vobiz_call_id") not in {None, vobiz_call_id}
+                    or session.realtime_error.is_set() or not session.output_task
+                    or session.output_task.done()
+                    or not session.peer or session.peer.connectionState != "connected"
+                ):
+                    raise RuntimeError("prepared_voice_unavailable")
+                session.attach(socket, stream_id, connecting_tone, self.l16_endian)
+                claim_task = asyncio.create_task(self.claim_remote_with_retries(call_id))
+                print(
+                    f"[caller vobiz] call_id={call_id} phase=attached "
+                    f"prepared_age_ms={int((time.monotonic() - prepared_record.created_at) * 1000)}",
+                    file=sys.stderr,
+                )
+            else:
+                context = await self.context(call_id, payload["direction"])
+                if context.get("vobiz_call_id") != vobiz_call_id:
+                    raise RuntimeError("vobiz_call_id_mismatch")
             async def enforce_deadline():
                 await asyncio.sleep(max(0, call_deadline - time.monotonic()))
                 try:
@@ -1488,42 +1688,20 @@ class VobizCodexBridge:
                 await socket.close(code=1000)
 
             deadline_task = asyncio.create_task(enforce_deadline())
-            await asyncio.wait_for(
-                self.claim_remote(call_id), timeout=max(0, call_deadline - time.monotonic())
-            )
-            app = await asyncio.wait_for(
-                self.ensure_codex(), timeout=max(0, call_deadline - time.monotonic())
-            )
-            if prepared_record:
-                session = await prepared_record.task
-                prepared_context = session.context
-                if (
-                    session.app is not app
-                    or any(prepared_context.get(key) != context.get(key) for key in (
-                        "direction", "instructions", "opening_speech", "codex_voice",
-                        "caller_number", "destination_number",
-                    ))
-                    or session.realtime_error.is_set() or not session.output_task
-                    or session.output_task.done()
-                ):
-                    await session.close()
-                    session = None
-                    prepared_record = None
-                else:
-                    session.attach(socket, stream_id, connecting_tone, self.l16_endian)
-                    print(
-                        f"[caller vobiz] call_id={call_id} phase=attached "
-                        f"prepared_age_ms={int((time.monotonic() - prepared_record.created_at) * 1000)}",
-                        file=sys.stderr,
-                    )
-            if session is None:
+            if not prepared_outbound:
+                await asyncio.wait_for(
+                    self.claim_remote(call_id), timeout=max(0, call_deadline - time.monotonic())
+                )
+                app = await asyncio.wait_for(
+                    self.ensure_codex(), timeout=max(0, call_deadline - time.monotonic())
+                )
                 print(f"[caller vobiz] call_id={call_id} phase=cold_start", file=sys.stderr)
                 input_track = VobizInputTrack(sample_rate)
                 session = CodexPSTNSession(app, socket, stream_id, context, input_track, self.l16_endian)
                 session.connecting_tone = connecting_tone
                 session._write_lock = connecting_tone.write_lock
             receiver = asyncio.create_task(self._receive_media(socket, session, encoding, sample_rate))
-            startup = asyncio.create_task(session.activate() if prepared_record else session.start())
+            startup = asyncio.create_task(session.activate() if prepared_outbound else session.start())
             done, _ = await asyncio.wait(
                 {startup, receiver, deadline_task}, return_when=asyncio.FIRST_COMPLETED
             )
@@ -1536,16 +1714,23 @@ class VobizCodexBridge:
                 await asyncio.gather(startup, return_exceptions=True)
                 if receiver.exception():
                     raise receiver.exception()
+                if prepared_outbound:
+                    raise RuntimeError("stream_ended_before_first_audio")
                 return
             await startup
             print(
                 f"[caller vobiz] call_id={call_id} phase=first_audio "
                 f"answer_to_audio_ms={int((time.monotonic() - answered_at) * 1000)} "
-                f"mode={'prepared' if prepared_record else 'cold'}",
+                f"mode={'prepared' if prepared_outbound else 'cold'}",
                 file=sys.stderr,
             )
-            await self.report(call_id, "connected")
             connected = True
+            if prepared_outbound:
+                connected_report_task = asyncio.create_task(
+                    self.report_connected_after_claim(call_id, claim_task)
+                )
+            else:
+                await self.report(call_id, "connected")
             idle = asyncio.create_task(self._idle_watchdog(session))
             error_watcher = asyncio.create_task(session.realtime_error.wait())
             done, _ = await asyncio.wait(
@@ -1574,9 +1759,10 @@ class VobizCodexBridge:
             raise
         except Exception as error:
             failed = True
-            detail = str(error)[:300]
-            print(f"[caller vobiz] call failed: {detail}", file=sys.stderr)
-            await self.report(call_id, "failed", detail=detail)
+            failed_detail = safe_outbound_failure_code(error)
+            print(f"[caller vobiz] call failed: {failed_detail}", file=sys.stderr)
+            if not prepared_outbound:
+                await self.report(call_id, "failed", detail=failed_detail)
             try:
                 await socket.close(code=1011, reason="voice unavailable")
             except Exception:
@@ -1600,11 +1786,24 @@ class VobizCodexBridge:
                     print(f"[caller vobiz] cleanup failed: {type(error).__name__}", file=sys.stderr)
             elif prepared_record:
                 await self._discard_prepared(prepared_record)
-            self.active_calls.discard(call_id)
-            if connected and not failed:
-                await self.finish_call(
-                    call_id, payload["direction"], session.transcript if session else []
-                )
+            try:
+                if prepared_outbound:
+                    # Persist the terminal outcome before any post-call HTTPS
+                    # work; Wi-Fi loss must not turn a failed call into success.
+                    if failed:
+                        await self.fail_outbound_call(call_id, failed_detail)
+                    elif connected:
+                        await self.finish_call(call_id, "outbound", session.transcript if session else [])
+                    if claim_task:
+                        await claim_task
+                    if connected_report_task:
+                        await connected_report_task
+                elif connected and not failed:
+                    await self.finish_call(
+                        call_id, payload["direction"], session.transcript if session else []
+                    )
+            finally:
+                self.active_calls.discard(call_id)
 
     async def _receive_media(self, socket, session: CodexPSTNSession, encoding: str, sample_rate: int):
         speech_frames = 0
@@ -1672,24 +1871,20 @@ async def serve(bridge: VobizCodexBridge, host: str, port: int):
     terminal_task = None
     notification_task = None
     try:
-        if bridge.terminal_spool:
-            try:
-                await bridge.replay_pending_terminal_events()
-            except Exception as error:
-                print(
-                    f"[caller vobiz] startup terminal replay pending: {type(error).__name__}",
-                    file=sys.stderr,
-                )
-            terminal_task = asyncio.create_task(bridge.terminal_event_loop())
-        await bridge.ensure_codex()
-        if bridge.caller_relay_url:
-            notification_task = asyncio.create_task(bridge.notification_loop())
         async with websocket_serve(
             bridge.handle, host, port, process_request=bridge.process_request,
             max_size=MAX_WS_MESSAGE, max_queue=256, ping_interval=20, ping_timeout=20,
             open_timeout=45,
         ):
             print(f"Caller Vobiz Codex bridge listening on {host}:{port}")
+            # Open health/prepare handling before any external replay can stall
+            # on an unreachable Worker. The loop retries pending records now
+            # and periodically while the listener remains available.
+            if bridge.terminal_spool:
+                terminal_task = asyncio.create_task(bridge.terminal_event_loop())
+            if bridge.caller_relay_url:
+                notification_task = asyncio.create_task(bridge.notification_loop())
+            await bridge.ensure_codex()
             await asyncio.Future()
     finally:
         if terminal_task:

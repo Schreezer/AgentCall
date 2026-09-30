@@ -17,6 +17,7 @@ from vobiz_codex_appserver import codex_version_supported  # noqa: E402
 
 
 SECRET = "test-secret" * 5
+PROVIDER_CALL_ID = "bb3a0bc5-5d9e-4b42-b4e7-4142cc1c2533"
 
 
 def signed_token(payload):
@@ -32,12 +33,19 @@ class VobizBridgeTests(unittest.TestCase):
         self.spool_dir = temporary.name
 
     def token(self, **overrides):
-        payload = {"v": 1, "id": "call-test", "exp": int(time.time()) + 90, "direction": "outbound"}
+        direction = overrides.get("direction", "outbound")
+        payload = {"v": 1, "id": "call-test", "exp": int(time.time()) + 90,
+                   "direction": "inbound"}
+        if direction == "outbound":
+            payload = {**payload, "v": 2, "direction": "outbound",
+                       "provider_call_id": PROVIDER_CALL_ID}
         payload.update(overrides)
         return signed_token(payload)
 
     def test_signed_token_validates_expiry_direction_and_signature(self):
         self.assertEqual(bridge.verify_stream_token(self.token(), SECRET)["id"], "call-test")
+        self.assertEqual(bridge.verify_stream_token(
+            self.token(direction="inbound"), SECRET)["direction"], "inbound")
         with self.assertRaises(ValueError):
             bridge.verify_stream_token(self.token() + "x", SECRET)
         with self.assertRaises(ValueError):
@@ -46,6 +54,15 @@ class VobizBridgeTests(unittest.TestCase):
             bridge.verify_stream_token(self.token(direction="other"), SECRET)
         with self.assertRaises(ValueError):
             bridge.verify_stream_token(self.token(exp=int(time.time()) + 600), SECRET)
+        for invalid in (
+            self.token(v=1), self.token(v=True),
+            self.token(provider_call_id="BB3A0BC5-5D9E-4B42-B4E7-4142CC1C2533"),
+            self.token(provider_call_id="provider-id"),
+            self.token(unexpected="extra"),
+            self.token(direction="inbound", provider_call_id=PROVIDER_CALL_ID),
+        ):
+            with self.subTest(token=invalid[:12]), self.assertRaises(ValueError):
+                bridge.verify_stream_token(invalid, SECRET)
 
     def test_opening_discloses_ai_speaker_without_changing_approved_line(self):
         approved = "Hi Chirag, this is your Hermes AI agent. How are you doing?"
@@ -217,14 +234,29 @@ class VobizBridgeTests(unittest.TestCase):
         service = bridge.VobizCodexBridge(
             relay_url="https://relay.example", agent_token="a" * 40,
             stream_secret=SECRET, codex_command="codex",
+            spool_dir=self.spool_dir,
         )
         first = bridge.verify_stream_token(self.token(), SECRET)
+        class DoneTask:
+            def done(self):
+                return True
+
+            def cancelled(self):
+                return False
+
+            def exception(self):
+                return None
+
+        with self.assertRaisesRegex(ValueError, "prewarm_missing"):
+            service.claim(first)
+        service.prepared_calls[first["id"]] = types.SimpleNamespace(task=DoneTask())
         service.claim(first)
         with self.assertRaisesRegex(ValueError, "bridge_busy"):
             service.claim(bridge.verify_stream_token(self.token(id="other-call"), SECRET))
         service.active_calls.clear()
         with self.assertRaisesRegex(ValueError, "replayed_stream_token"):
             service.claim(first)
+        service.prepared_calls.clear()
         with self.assertRaisesRegex(ValueError, "inbound_not_enabled"):
             service.claim(bridge.verify_stream_token(self.token(id="inbound", direction="inbound"), SECRET))
 
@@ -618,7 +650,7 @@ class VobizBridgeTests(unittest.TestCase):
 
             with mock.patch.object(service, "report", new=mock.AsyncMock(return_value=True)), \
                     mock.patch.object(service, "drain_notifications", new=mock.AsyncMock()) as drain:
-                await service.finish_call("call-test", "outbound", transcript)
+                await service.finish_call("outbound-call", "outbound", transcript)
             drain.assert_not_awaited()
 
             summary_message = "Caller said (unverified): Please call back about the delivery."
@@ -712,6 +744,150 @@ class VobizBridgeTests(unittest.TestCase):
         import asyncio
         asyncio.run(check())
 
+    def test_outbound_failure_survives_outage_and_replays_after_restart(self):
+        async def check():
+            from unittest import mock
+
+            first = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", spool_dir=self.spool_dir,
+            )
+            detail = bridge.safe_outbound_failure_code(RuntimeError(
+                "TLS failed for +919000000001 with Bearer private-token"
+            ))
+            self.assertEqual(detail, bridge.OUTBOUND_FAILURE_FALLBACK)
+            with mock.patch.object(first, "report", new=mock.AsyncMock(return_value=False)) as down:
+                await first.fail_outbound_call("outbound-call", detail)
+                await first.fail_outbound_call("outbound-call", "codex_realtime_error")
+            self.assertEqual(down.await_count, 2)
+            self.assertEqual(down.await_args_list[0].kwargs, down.await_args_list[1].kwargs)
+            pending = pathlib.Path(self.spool_dir) / "outbound-call.json"
+            self.assertEqual(pending.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(pathlib.Path(self.spool_dir).stat().st_mode & 0o777, 0o700)
+            stored = pending.read_text()
+            self.assertEqual(json.loads(stored), {
+                "v": 2, "call_id": "outbound-call", "direction": "outbound",
+                "event": "failed", "detail": bridge.OUTBOUND_FAILURE_FALLBACK,
+            })
+            self.assertNotIn("9000000001", stored)
+            self.assertNotIn("private-token", stored)
+            self.assertNotIn("TLS failed", stored)
+
+            restarted = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", spool_dir=self.spool_dir,
+            )
+            with mock.patch.object(restarted, "report", new=mock.AsyncMock(return_value=False)):
+                self.assertEqual(await restarted.replay_pending_terminal_events(), 0)
+            self.assertTrue(pending.exists())
+            with mock.patch.object(restarted, "report", new=mock.AsyncMock(return_value=True)) as recovered:
+                self.assertEqual(await restarted.replay_pending_terminal_events(), 1)
+            recovered.assert_awaited_once_with(
+                "outbound-call", "failed", detail=bridge.OUTBOUND_FAILURE_FALLBACK,
+            )
+            self.assertFalse(pending.exists())
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_outbound_ended_spools_only_bounded_redacted_recipient_speech(self):
+        async def check():
+            from unittest import mock
+
+            first = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", spool_dir=self.spool_dir,
+            )
+            transcript = [
+                {"role": "assistant", "text": "Private call brief and Bearer credential."},
+                {"role": "user", "text": "Call me about lunch at +919000000001. Password is bluebird."},
+            ]
+            with mock.patch.object(first, "report", new=mock.AsyncMock(return_value=False)) as down:
+                await first.finish_call("outbound-call", "outbound", transcript)
+                await first.fail_outbound_call("outbound-call", "codex_realtime_error")
+            self.assertEqual([call.args[1] for call in down.await_args_list], ["ended", "ended"])
+            pending = pathlib.Path(self.spool_dir) / "outbound-call.json"
+            record = json.loads(pending.read_text())
+            self.assertEqual(record["event"], "ended")
+            self.assertLessEqual(len(record["summary"]), 500)
+            self.assertNotIn("9000000001", record["summary"])
+            self.assertNotIn("bluebird", record["summary"])
+            self.assertNotIn("Private call brief", record["summary"])
+            self.assertNotIn("transcript", record)
+            restarted = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", spool_dir=self.spool_dir,
+            )
+            with mock.patch.object(restarted, "report", new=mock.AsyncMock(return_value=True)) as recovered:
+                self.assertEqual(await restarted.replay_pending_terminal_events(), 1)
+            recovered.assert_awaited_once_with(
+                "outbound-call", "ended", summary=record["summary"],
+            )
+            self.assertFalse(pending.exists())
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_outbound_terminal_spool_keeps_event_until_worker_accepts_it(self):
+        async def check():
+            from unittest import mock
+
+            service = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", spool_dir=self.spool_dir,
+            )
+            service.terminal_spool.persist_outbound(
+                "outbound-call", "failed", detail="stream_ended_before_first_audio",
+            )
+            pending = pathlib.Path(self.spool_dir) / "outbound-call.json"
+            rejected = mock.AsyncMock(return_value=(409, {"error": "not_ready"}))
+            with mock.patch.object(bridge, "http_json", rejected), \
+                    mock.patch.object(bridge.asyncio, "sleep", new=mock.AsyncMock()):
+                self.assertEqual(await service.replay_pending_terminal_events(), 0)
+            self.assertTrue(pending.exists())
+            self.assertEqual(rejected.await_count, 3)
+            accepted = mock.AsyncMock(return_value=(202, {"ok": True}))
+            with mock.patch.object(bridge, "http_json", accepted):
+                self.assertEqual(await service.replay_pending_terminal_events(), 1)
+            self.assertFalse(pending.exists())
+            self.assertEqual(accepted.await_args.kwargs["body"], {
+                "event": "failed", "detail": "stream_ended_before_first_audio",
+            })
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_periodic_replay_delivers_outbound_event_after_outage(self):
+        async def check():
+            import asyncio
+            from unittest import mock
+
+            service = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", spool_dir=self.spool_dir,
+            )
+            service.terminal_spool.persist_outbound(
+                "outbound-call", "failed", detail="voice_stream_failed",
+            )
+            pending = pathlib.Path(self.spool_dir) / "outbound-call.json"
+            with mock.patch.object(service, "report", new=mock.AsyncMock(
+                    side_effect=[False, True])) as report, \
+                    mock.patch.object(bridge, "TERMINAL_EVENT_POLL_SECONDS", 0.01):
+                replay = asyncio.create_task(service.terminal_event_loop())
+                try:
+                    async def delivered():
+                        while pending.exists():
+                            await asyncio.sleep(0.01)
+
+                    await asyncio.wait_for(delivered(), timeout=1)
+                finally:
+                    replay.cancel()
+                    await asyncio.gather(replay, return_exceptions=True)
+            self.assertEqual(report.await_count, 2)
+
+        import asyncio
+        asyncio.run(check())
+
     def test_duplicate_terminal_attempt_keeps_first_spooled_report(self):
         async def check():
             from unittest import mock
@@ -741,6 +917,7 @@ class VobizBridgeTests(unittest.TestCase):
     def test_terminal_spool_replays_at_startup_without_caller_credentials(self):
         async def check():
             from unittest import mock
+            import asyncio
 
             service = bridge.VobizCodexBridge(
                 relay_url="https://relay.example", agent_token="a" * 40,
@@ -748,14 +925,90 @@ class VobizBridgeTests(unittest.TestCase):
                 spool_dir=self.spool_dir,
             )
             service.terminal_spool.persist("call-test", "Caller said: The delivery arrived late.")
-            with mock.patch.object(service, "report", new=mock.AsyncMock(return_value=True)) as report, \
-                    mock.patch.object(service, "ensure_codex", new=mock.AsyncMock(
-                        side_effect=RuntimeError("codex unavailable")
-                    )):
+            service.terminal_spool.persist_outbound(
+                "outbound-call", "failed", detail="voice_stream_failed",
+            )
+            replayed = asyncio.Event()
+
+            async def report_event(*_args, **_kwargs):
+                if report.await_count == 2:
+                    replayed.set()
+                return True
+
+            async def unavailable():
+                await replayed.wait()
+                raise RuntimeError("codex unavailable")
+
+            with mock.patch.object(service, "report", new=mock.AsyncMock(
+                    side_effect=report_event)) as report, \
+                    mock.patch.object(service, "ensure_codex", new=unavailable):
                 with self.assertRaisesRegex(RuntimeError, "codex unavailable"):
-                    await bridge.serve(service, "127.0.0.1", 0)
-            report.assert_awaited_once()
+                    await asyncio.wait_for(bridge.serve(service, "127.0.0.1", 0), timeout=2)
+            self.assertEqual(report.await_count, 2)
+            self.assertIn(mock.call("outbound-call", "failed", detail="voice_stream_failed"),
+                          report.await_args_list)
             self.assertFalse((pathlib.Path(self.spool_dir) / "call-test.json").exists())
+            self.assertFalse((pathlib.Path(self.spool_dir) / "outbound-call.json").exists())
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_listener_serves_health_while_outbound_replay_is_slow(self):
+        async def check():
+            import asyncio
+            import socket
+            import urllib.request
+            from unittest import mock
+
+            service = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", spool_dir=self.spool_dir,
+            )
+            service.terminal_spool.persist_outbound(
+                "outbound-call", "failed", detail="voice_stream_failed",
+            )
+            report_started = asyncio.Event()
+            release_report = asyncio.Event()
+            codex_started = asyncio.Event()
+
+            async def slow_failed_report(*_args, **_kwargs):
+                report_started.set()
+                await release_report.wait()
+                return False
+
+            async def slow_codex():
+                codex_started.set()
+                await asyncio.Event().wait()
+
+            with socket.socket() as listener:
+                listener.bind(("127.0.0.1", 0))
+                port = listener.getsockname()[1]
+
+            with mock.patch.object(service, "report", new=slow_failed_report), \
+                    mock.patch.object(service, "ensure_codex", new=slow_codex):
+                server = asyncio.create_task(bridge.serve(service, "127.0.0.1", port))
+                try:
+                    await asyncio.wait_for(report_started.wait(), timeout=2)
+                    await asyncio.wait_for(codex_started.wait(), timeout=2)
+
+                    def fetch_health():
+                        with urllib.request.urlopen(
+                            f"http://127.0.0.1:{port}/health", timeout=2,
+                        ) as response:
+                            return response.status, json.loads(response.read())
+
+                    status, body = await asyncio.wait_for(
+                        asyncio.to_thread(fetch_health), timeout=3,
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertFalse(body["runtime_ready"])
+                    self.assertFalse(body["codex_ready"])
+                    self.assertTrue((pathlib.Path(self.spool_dir) / "outbound-call.json").exists())
+                    self.assertFalse(server.done())
+                finally:
+                    release_report.set()
+                    server.cancel()
+                    await asyncio.gather(server, return_exceptions=True)
 
         import asyncio
         asyncio.run(check())

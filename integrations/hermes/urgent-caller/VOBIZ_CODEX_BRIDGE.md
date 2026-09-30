@@ -6,7 +6,7 @@ joins a Codex App Server realtime session as a WebRTC audio peer, and relays aud
 in both directions. For outbound calls, the Worker asks the bridge to prepare
 that call's Sol thread and GPT Live WebRTC session **before** it asks Vobiz to
 dial. The bridge releases the opening only after the answered stream is
-authenticated and claimed. It uses the existing Hermes `openai-codex` credential pool
+authenticated and bound to that prepared session. It uses the existing Hermes `openai-codex` credential pool
 and ChatGPT authentication. It pins `gpt-6-sol` as the Codex text reasoning
 model and uses the Codex realtime default GPT-Live model for speech. GPT-6 Sol
 does not process audio directly. The voice model can answer a greeting or brief
@@ -183,8 +183,9 @@ Caddy should expose `https://claw.forgeme.xyz/caller-vobiz/*` through
 and no call or prepared outbound session occupies this one-call pilot. It also
 returns `runtime_ready: true` when the App Server and verified WebRTC runtime
 are alive even while an outbound call has reserved capacity. The Worker uses
-`codex_ready` to admit a new call and `runtime_ready` for the Answer callback
-of an already prepared outbound call. On startup, the bridge starts and
+`codex_ready` to admit a new call. The outbound Answer callback returns its
+stream without a new bridge health fetch; the bridge checks the reserved
+session's liveness before attaching it. On startup, the bridge starts and
 verifies a `gpt-6-sol` thread, performs a ChatGPT-authenticated synthetic
 WebRTC SDP/ICE exchange, and requires nonzero audio before exposing
 `codex_ready: true`. This startup check proves the configured Sol thread and
@@ -203,18 +204,20 @@ an authenticated `GET /caller-vobiz/cancel/<call-id>` closes an unclaimed
 session. The Worker sends cancel after definite pre-dial failures and
 pre-answer hangups. These endpoints require a distinct short-lived V2 HMAC
 Bearer token bound to the call ID, outbound direction, expiry, and action;
-stream URL V1 tokens cannot authorize them. The token never appears in an
+stream URL tokens cannot authorize them. The token never appears in an
 action URL. A preparation failure prevents the Worker from dialing.
 
 As soon as the bridge verifies the signed WebSocket token and Vobiz `start`
-frame format, it plays a paced, clearly audible in-call connecting tone while
-checking the Worker call record and claiming the call. It verifies the
-provider call ID against the Worker record before attaching the prepared
-session and sending the GPT Live activation cue. If the reservation is missing
-or detected unhealthy **before attachment**, the bridge uses the existing
-in-call cold start path while the tone continues. A failure during or after
-activation ends the call; it does not risk replaying buffered or duplicate
-speech through a second session. An 8 kHz provider input is
+frame format, it plays a paced in-call connecting tone. For outbound calls it
+compares `start.callId` with the callback-verified provider UUID signed into
+the stream token, checks the already prepared session, and attaches it without
+another Worker context fetch. The remote claim and connected event run in the
+background; an HTTPS delay on those bookkeeping requests cannot hold speech.
+A missing or unhealthy outbound reservation fails closed, with no cold start.
+Inbound calls retain their fresh context fetch, synchronous claim, and Codex
+start after answer. A failure during or after activation ends the call; it
+does not risk replaying buffered or duplicate speech through a second session.
+An 8 kHz provider input is
 resampled into the prepared 16 kHz WebRTC input. Inbound calls continue to
 start only after the stream arrives. The tone
 uses the [published Indian local ringing cadence](https://www.itu.int/dms_pub/itu-t/opb/sp/T-SP-E.180-2010-PDF-E.pdf)
@@ -247,20 +250,24 @@ final playback, waits up to four seconds for Vobiz `playedStream`, then sends
 The isolated Worker gives Vobiz an Answer URL that returns `<Stream
 bidirectional="true" keepCallAlive="true"
 contentType="audio/x-l16;rate=16000">` pointing at the public WSS URL with a
-short-lived signed `token` query parameter. The token is
-`base64url(JSON({v:1,id,exp,direction})).base64url(HMAC-SHA256(secret,
-first_segment))`, where `direction` is `outbound` or `inbound`. The bridge checks
-it, then fetches
-`GET /v1/vobiz/bridge/calls/{id}` using `VOBIZ_RELAY_TOKEN`. The context must
-include `id`, `direction`, `instructions`, and `opening_speech`;
-`vobiz_call_id` is unbound during pre-dial preparation and must be set before
-the answered stream is claimed. Inbound context must also include the owned E.164
-`called_number` and may include an unverified E.164 `caller_number`. The bridge
-compares the expected `vobiz_call_id` with
-Vobiz's `start.callId` and atomically claims the call at
-`POST /v1/vobiz/bridge/calls/{id}/claim` before releasing prepared GPT Live
-speech or cold starting Codex. This Worker
-claim blocks token replay after a bridge restart.
+short-lived signed `token` query parameter. Inbound uses
+`base64url(JSON({v:1,id,exp,direction:"inbound"})).base64url(HMAC-SHA256(secret,
+first_segment))`. The bridge fetches inbound context through
+`GET /v1/vobiz/bridge/calls/{id}` using `VOBIZ_RELAY_TOKEN`; it requires the
+owned E.164 `called_number`, may accept an unverified E.164 `caller_number`,
+compares the expected `vobiz_call_id` with Vobiz's `start.callId`, and claims
+the call synchronously before voice starts.
+
+Outbound uses an exact V2 stream payload
+`{v:2,id,exp,direction:"outbound",provider_call_id}` signed the same way.
+The provider call ID is the callback-verified lowercase UUID. The bridge
+requires the matching prepared session, which already holds the authenticated
+context fetched before dialing, and compares `start.callId` to that UUID.
+It consumes the local call reservation once, including across replay attempts
+in the running process. After a bridge restart the prepared session is absent,
+so the stream fails closed. A remote `/claim` records the attachment in the
+Worker in the background; the provider Hangup and terminal bridge event can
+still record the outcome if that claim is late.
 
 First test the DID binding with the Worker inbound flag off: valid signed
 callbacks are recorded as `blocked_disabled`, while Answer returns `<Hangup/>`.
@@ -272,8 +279,8 @@ Jio call cannot be distinguished from a direct DID call using caller ID alone,
 so both use the same message-taking policy.
 
 The bridge reports `connected`, `ended`, or `failed` to
-`POST /v1/vobiz/bridge/calls/{id}/events`. Outbound `ended` includes up to 20
-transcript turns (400 characters each). Inbound `ended` instead includes a
+`POST /v1/vobiz/bridge/calls/{id}/events`. Outbound `ended` carries a bounded,
+digit-redacted excerpt of recipient speech. Inbound `ended` includes a
 maximum 500-character `inbound_report` made from the caller's own words, with
 digits redacted, plus a bounded summary copied from that report. This is
 evidence of what was heard, not a semantic interpretation or a claim that
@@ -290,6 +297,18 @@ and preserve the caller's own words in its bounded report. Outbound calls
 likewise adapt to the recipient's language after the approved opening. This is
 a prompt behavior, not a guarantee of proficiency in every language; the live DID test
 must include the languages Chirag expects to receive.
+
+Before posting an `ended` or `failed` event, the bridge writes the first
+terminal outcome to `/home/chirag/.local/state/caller-vobiz-bridge/terminal-events`
+in a mode-0700 directory using mode-0600 files. Outbound files contain only a
+fixed failure code or a bounded, digit-redacted recipient excerpt; they contain
+no audio, full transcript, phone number, or credential. Existing inbound
+report files remain readable. The first outcome for a call wins, and the file
+is removed only after the Worker accepts the event. Startup and periodic
+background replay recover from a transient Worker outage or bridge restart
+without holding the health/WebSocket listener closed. Outbound prewarming
+fails before dialing if the spool is absent or full. This protects terminal
+report delivery; it cannot keep a live media stream alive during a Wi-Fi outage.
 
 If the optional Caller relay URL and token are present, a completed inbound
 call queues one durable outbox item. The bridge delivers one idempotent

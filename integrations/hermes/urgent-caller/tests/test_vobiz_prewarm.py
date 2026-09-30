@@ -21,6 +21,7 @@ import vobiz_codex_bridge as bridge  # noqa: E402
 
 SECRET = "test-secret" * 5
 CALL_ID = "e63e26f5-2739-4ee0-b21f-b6ce02d03f18"
+PROVIDER_CALL_ID = "bb3a0bc5-5d9e-4b42-b4e7-4142cc1c2533"
 
 
 def signed_token(payload):
@@ -49,10 +50,16 @@ class FakePreparedSession:
 
 
 class VobizPrewarmTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.spool_dir = temporary.name
+
     def service(self):
         return bridge.VobizCodexBridge(
             relay_url="https://relay.example", agent_token="a" * 40,
             stream_secret=SECRET, codex_command="codex",
+            spool_dir=self.spool_dir,
         )
 
     def test_action_token_is_distinct_from_stream_and_bound_to_action_and_call(self):
@@ -244,6 +251,24 @@ class VobizPrewarmTests(unittest.TestCase):
 
         asyncio.run(check())
 
+    def test_full_or_terminal_spool_rejects_before_preparing_voice(self):
+        async def check():
+            service = self.service()
+            service.terminal_spool.persist_outbound(
+                "older-call", "failed", detail="voice_stream_failed",
+            )
+            with mock.patch.object(service, "_create_prepared_session",
+                                   new=mock.AsyncMock()) as prepare:
+                with mock.patch.object(bridge, "MAX_TERMINAL_SPOOL_ENTRIES", 1):
+                    with self.assertRaisesRegex(RuntimeError, "terminal_spool_full"):
+                        await service.prepare_call(CALL_ID)
+                with self.assertRaisesRegex(RuntimeError, "terminal_spool_call_already_terminal"):
+                    await service.prepare_call("older-call")
+            prepare.assert_not_awaited()
+            self.assertFalse(service.prepared_calls)
+
+        asyncio.run(check())
+
     def test_cancel_and_expiry_release_prepared_session_once(self):
         async def check():
             service = self.service()
@@ -409,7 +434,16 @@ class VobizPrewarmTests(unittest.TestCase):
     def test_answered_stream_uses_prepared_session_without_starting_another(self):
         async def check():
             service = self.service()
-            app = object()
+            class Reader:
+                def done(self):
+                    return False
+
+            app = types.SimpleNamespace(
+                process=types.SimpleNamespace(returncode=None),
+                reader_task=Reader(), broken=False,
+            )
+            service.app = app
+            service.webrtc_verified = True
             prepared_context = {
                 "id": CALL_ID, "direction": "outbound",
                 "instructions": "Ask about lunch.",
@@ -418,8 +452,10 @@ class VobizPrewarmTests(unittest.TestCase):
                 "destination_number": "+919000000002",
                 "vobiz_call_id": None,
             }
-            answered_context = {**prepared_context, "vobiz_call_id": "provider-id"}
             done = asyncio.Event()
+            activated = asyncio.Event()
+            claim_started = asyncio.Event()
+            claim_release = asyncio.Event()
             lifecycle = []
 
             class Prepared:
@@ -430,6 +466,7 @@ class VobizPrewarmTests(unittest.TestCase):
                     self.output_task = asyncio.create_task(asyncio.Event().wait())
                     self.transcript = []
                     self.last_voice_at = bridge.time.monotonic()
+                    self.peer = types.SimpleNamespace(connectionState="connected")
                     self.attached = False
                     self.activated = False
 
@@ -438,6 +475,7 @@ class VobizPrewarmTests(unittest.TestCase):
 
                 async def activate(self):
                     self.activated = True
+                    activated.set()
 
                 async def close(self):
                     self.output_task.cancel()
@@ -446,16 +484,17 @@ class VobizPrewarmTests(unittest.TestCase):
             prepared = Prepared()
             task = asyncio.create_task(asyncio.sleep(0, result=prepared))
             service.prepared_calls[CALL_ID] = bridge.PreparedCall(task)
+            await task
 
             class Socket:
                 request = types.SimpleNamespace(path="/vobiz?token=" + signed_token({
-                    "v": 1, "id": CALL_ID, "exp": int(bridge.time.time()) + 90,
-                    "direction": "outbound",
+                    "v": 2, "id": CALL_ID, "exp": int(bridge.time.time()) + 90,
+                    "direction": "outbound", "provider_call_id": PROVIDER_CALL_ID,
                 }))
 
                 async def recv(self):
                     return json.dumps({"event": "start", "start": {
-                        "streamId": "stream-test", "callId": "provider-id",
+                        "streamId": "stream-test", "callId": PROVIDER_CALL_ID,
                         "mediaFormat": {"encoding": "audio/x-l16", "sampleRate": 16000},
                     }})
 
@@ -474,18 +513,202 @@ class VobizPrewarmTests(unittest.TestCase):
                     done.set()
                 return True
 
-            with mock.patch.object(service, "context", new=mock.AsyncMock(return_value=answered_context)), \
-                    mock.patch.object(service, "claim_remote", new=mock.AsyncMock()), \
-                    mock.patch.object(service, "ensure_codex", new=mock.AsyncMock(return_value=app)), \
+            async def claim_remote(call_id):
+                self.assertEqual(call_id, CALL_ID)
+                claim_started.set()
+                await claim_release.wait()
+
+            with mock.patch.object(service, "context", new=mock.AsyncMock(
+                    side_effect=AssertionError("answer-time context fetch"))) as context, \
+                    mock.patch.object(service, "claim_remote", new=mock.AsyncMock(
+                        side_effect=claim_remote)) as claim, \
+                    mock.patch.object(service, "ensure_codex", new=mock.AsyncMock(
+                        side_effect=AssertionError("answer-time Codex restart"))) as ensure, \
                     mock.patch.object(service, "_receive_media", new=receive_media), \
                     mock.patch.object(service, "report", new=report), \
                     mock.patch.object(bridge, "CodexPSTNSession", side_effect=AssertionError("cold start")):
-                await asyncio.wait_for(service.handle(Socket()), timeout=2)
+                handle = asyncio.create_task(service.handle(Socket()))
+                await asyncio.wait_for(activated.wait(), timeout=1)
+                await asyncio.wait_for(claim_started.wait(), timeout=1)
+                self.assertEqual(lifecycle, [])
+                self.assertFalse(handle.done())
+                claim_release.set()
+                await asyncio.wait_for(handle, timeout=2)
             self.assertTrue(prepared.attached)
             self.assertTrue(prepared.activated)
+            context.assert_not_awaited()
+            ensure.assert_not_awaited()
+            claim.assert_awaited_once_with(CALL_ID)
             self.assertEqual(lifecycle, ["connected", "ended"])
             self.assertFalse(service.prepared_calls)
             self.assertFalse(service.active_calls)
+
+        asyncio.run(check())
+
+    def test_outbound_stream_requires_prepared_session_before_upgrade(self):
+        async def check():
+            service = self.service()
+            token = signed_token({
+                "v": 2, "id": CALL_ID, "exp": int(bridge.time.time()) + 90,
+                "direction": "outbound", "provider_call_id": PROVIDER_CALL_ID,
+            })
+
+            class Connection:
+                def respond(self, status, body):
+                    return status, body
+
+            request = types.SimpleNamespace(path="/vobiz?token=" + token)
+            status, _ = await service.process_request(Connection(), request)
+            self.assertEqual(status, 503)
+            with self.assertRaisesRegex(ValueError, "prewarm_missing"):
+                service.claim(bridge.verify_stream_token(token, SECRET))
+
+        asyncio.run(check())
+
+    def test_provider_start_mismatch_never_claims_or_activates(self):
+        async def check():
+            service = self.service()
+            prepared = FakePreparedSession()
+            task = asyncio.create_task(asyncio.sleep(0, result=prepared))
+            service.prepared_calls[CALL_ID] = bridge.PreparedCall(task)
+            await task
+            events = []
+
+            class Socket:
+                request = types.SimpleNamespace(path="/vobiz?token=" + signed_token({
+                    "v": 2, "id": CALL_ID, "exp": int(bridge.time.time()) + 90,
+                    "direction": "outbound", "provider_call_id": PROVIDER_CALL_ID,
+                }))
+
+                def __init__(self):
+                    self.closed = False
+
+                async def recv(self):
+                    return json.dumps({"event": "start", "start": {
+                        "streamId": "stream-test",
+                        "callId": "d4dbe0ce-b15c-4c8e-83c6-7e40a13c6f73",
+                        "mediaFormat": {"encoding": "audio/x-l16", "sampleRate": 16000},
+                    }})
+
+                async def close(self, **_):
+                    self.closed = True
+
+            async def report(_call_id, event, **_extra):
+                events.append(event)
+                return True
+
+            socket = Socket()
+            with mock.patch.object(service, "claim_remote", new=mock.AsyncMock()) as claim, \
+                    mock.patch.object(service, "report", new=report):
+                await service.handle(socket)
+            self.assertTrue(socket.closed)
+            self.assertEqual(prepared.closed, 1)
+            self.assertEqual(events, ["failed"])
+            claim.assert_not_awaited()
+            self.assertFalse(service.active_calls)
+
+        asyncio.run(check())
+
+    def test_clean_stream_end_before_first_audio_reports_failed(self):
+        async def check():
+            service = self.service()
+
+            class Reader:
+                def done(self):
+                    return False
+
+            app = types.SimpleNamespace(
+                process=types.SimpleNamespace(returncode=None),
+                reader_task=Reader(), broken=False,
+            )
+            service.app = app
+            service.webrtc_verified = True
+            activated = asyncio.Event()
+
+            class Prepared:
+                def __init__(self):
+                    self.app = app
+                    self.context = {"id": CALL_ID, "direction": "outbound",
+                                    "vobiz_call_id": None}
+                    self.realtime_error = asyncio.Event()
+                    self.output_task = asyncio.create_task(asyncio.Event().wait())
+                    self.peer = types.SimpleNamespace(connectionState="connected")
+                    self.transcript = []
+
+                def attach(self, *_):
+                    pass
+
+                async def activate(self):
+                    activated.set()
+                    await asyncio.Event().wait()
+
+                async def close(self):
+                    self.output_task.cancel()
+                    await asyncio.gather(self.output_task, return_exceptions=True)
+
+            prepared = Prepared()
+            task = asyncio.create_task(asyncio.sleep(0, result=prepared))
+            service.prepared_calls[CALL_ID] = bridge.PreparedCall(task)
+            await task
+
+            class Socket:
+                request = types.SimpleNamespace(path="/vobiz?token=" + signed_token({
+                    "v": 2, "id": CALL_ID, "exp": int(bridge.time.time()) + 90,
+                    "direction": "outbound", "provider_call_id": PROVIDER_CALL_ID,
+                }))
+
+                def __init__(self):
+                    self.closed = False
+
+                async def recv(self):
+                    return json.dumps({"event": "start", "start": {
+                        "streamId": "stream-test", "callId": PROVIDER_CALL_ID,
+                        "mediaFormat": {"encoding": "audio/x-l16", "sampleRate": 16000},
+                    }})
+
+                async def send(self, _raw):
+                    pass
+
+                async def close(self, **_):
+                    self.closed = True
+
+            events = []
+
+            async def report(_call_id, event, **extra):
+                events.append((event, extra))
+                return True
+
+            async def receive_media(*_):
+                await activated.wait()
+
+            socket = Socket()
+            with mock.patch.object(service, "claim_remote_with_retries",
+                                   new=mock.AsyncMock(return_value=False)), \
+                    mock.patch.object(service, "_receive_media", new=receive_media), \
+                    mock.patch.object(service, "report", new=report):
+                await asyncio.wait_for(service.handle(socket), timeout=2)
+            self.assertTrue(socket.closed)
+            self.assertEqual(events, [("failed", {
+                "detail": "stream_ended_before_first_audio",
+            })])
+            self.assertFalse(service.active_calls)
+
+        asyncio.run(check())
+
+    def test_failed_background_claim_does_not_suppress_terminal_report(self):
+        async def check():
+            service = self.service()
+            events = []
+
+            async def report(_call_id, event, **_extra):
+                events.append(event)
+                return True
+
+            claim_task = asyncio.create_task(asyncio.sleep(0, result=False))
+            with mock.patch.object(service, "report", new=report):
+                self.assertFalse(await service.report_connected_after_claim(CALL_ID, claim_task))
+                await service.finish_call(CALL_ID, "outbound", [])
+            self.assertEqual(events, ["ended"])
 
         asyncio.run(check())
 
