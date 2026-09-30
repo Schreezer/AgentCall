@@ -418,6 +418,8 @@ describe("isolated Vobiz outbound relay", () => {
     expect(first.status).toBe(201);
     const payload = requests.at(-1).payload;
     expect(payload.time_limit).toBe(180);
+    expect(payload).not.toHaveProperty("hangup_on_ring");
+    expect(payload).not.toHaveProperty("ring_timeout");
     const firstCall = await first.json();
     const firstHangupPath = new URL(payload.hangup_url).pathname;
     expect((await handleVobizCallback(unsignedCallback(firstHangupPath,

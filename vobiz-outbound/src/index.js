@@ -381,7 +381,8 @@ export async function createPstnCall(request, env, fetcher = fetch) {
     answer_url: callback("answer"), answer_method: "POST",
     ring_url: callback("ring"), ring_method: "POST",
     hangup_url: callback("hangup"), hangup_method: "POST",
-    time_limit: Math.floor(MAX_CALL_MS / 1000), hangup_on_ring: 30,
+    // Vobiz counts hangup_on_ring from ringing, which can end an answered call.
+    time_limit: Math.floor(MAX_CALL_MS / 1000),
   };
   // Reserve the rolling dispatch interval immediately before the provider request.
   if (!(await allowOutbound(env))) {
