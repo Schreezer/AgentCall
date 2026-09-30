@@ -340,6 +340,7 @@ class VobizBridgeTests(unittest.TestCase):
             session = bridge.CodexPSTNSession(None, socket, "stream-test", {}, None)
             session.connecting_tone = tone
             session._write_lock = tone.write_lock
+            session._activated = True
             with mock.patch.dict(sys.modules, {"av": types.SimpleNamespace(
                 AudioResampler=lambda **_: types.SimpleNamespace(resample=lambda frame: [frame]),
             )}):

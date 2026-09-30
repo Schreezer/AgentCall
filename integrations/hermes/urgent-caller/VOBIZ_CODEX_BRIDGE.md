@@ -3,7 +3,10 @@
 The bridge is a separate Python service for the personal Vobiz calling pilot. It
 accepts a Vobiz bidirectional WebSocket stream after a call connects,
 joins a Codex App Server realtime session as a WebRTC audio peer, and relays audio
-in both directions. It uses the existing Hermes `openai-codex` credential pool
+in both directions. For outbound calls, the Worker asks the bridge to prepare
+that call's Sol thread and GPT Live WebRTC session **before** it asks Vobiz to
+dial. The bridge releases the opening only after the answered stream is
+authenticated and claimed. It uses the existing Hermes `openai-codex` credential pool
 and ChatGPT authentication. It pins `gpt-6-sol` as the Codex text reasoning
 model and uses the Codex realtime default GPT-Live model for speech. GPT-6 Sol
 does not process audio directly. The voice model can answer a greeting or brief
@@ -35,7 +38,7 @@ Required service environment:
 | --- | --- |
 | `VOBIZ_RELAY_URL` | Base HTTPS URL of the isolated outbound Worker |
 | `VOBIZ_RELAY_TOKEN` | Bridge-only Worker bearer token |
-| `VOBIZ_BRIDGE_SECRET` | Shared HMAC key for Vobiz stream URLs, at least 32 characters |
+| `VOBIZ_BRIDGE_SECRET` | Shared HMAC key for Vobiz stream URLs and pre-dial action tokens, at least 32 characters |
 | `VOBIZ_CODEX_LAUNCHER` | Absolute executable path to `vobiz_codex_bwrap.sh` |
 | `VOBIZ_BWRAP_BINARY` | Absolute path to `bwrap`, usually `/usr/bin/bwrap` |
 | `VOBIZ_CODEX_PACKAGE_ROOT` | Exact directory containing the Codex CLI entry and its runtime assets |
@@ -62,7 +65,9 @@ or different startup model keeps readiness false. Any `model/rerouted`
 notification during a call aborts that call. The realtime
 session leaves its `model` unset, selecting Codex's supported GPT-Live speech
 model. The thread's developer instructions restrict its text responses to the
-approved call brief.
+approved call brief. A WebRTC `failed` or `closed` state ends the call
+immediately. A transient `disconnected` state has five seconds to recover;
+the bridge ends the call only if it remains disconnected.
 This filesystem boundary is required even though a local spoken canary did not
 produce a file-tool call; the canary cannot prove future Codex versions have no
 built-in tools. The launcher still shares networking for WebRTC; test and
@@ -175,17 +180,43 @@ Caddy should expose `https://claw.forgeme.xyz/caller-vobiz/*` through
 `handle_path` to `127.0.0.1:8793`, making the public stream URL
 `wss://claw.forgeme.xyz/caller-vobiz/vobiz`. The bridge's `GET /health` returns
 `codex_ready: true` only while the authenticated App Server process is alive
-and no call occupies this one-call pilot. On startup, the bridge starts and
+and no call or prepared outbound session occupies this one-call pilot. It also
+returns `runtime_ready: true` when the App Server and verified WebRTC runtime
+are alive even while an outbound call has reserved capacity. The Worker uses
+`codex_ready` to admit a new call and `runtime_ready` for the Answer callback
+of an already prepared outbound call. On startup, the bridge starts and
 verifies a `gpt-6-sol` thread, performs a ChatGPT-authenticated synthetic
 WebRTC SDP/ICE exchange, and requires nonzero audio before exposing
 `codex_ready: true`. This startup check proves the configured Sol thread and
 voice transport; it does not exercise a substantive backend handoff. Each
 actual call still has its own SDP/ICE/media exchange.
+
+After the Worker persists an outbound call row, it sends an authenticated
+`GET /caller-vobiz/prepare/<call-id>` to the bridge and waits for HTTP 200 with
+`{"ok":true,"prepared":true}` before issuing Vobiz's outbound dial request.
+The bridge fetches the approved brief, pins the ephemeral `gpt-6-sol` thread,
+and completes the GPT Live WebRTC SDP/ICE exchange within 38 seconds. It feeds
+silence to the audio input and continuously drains any early model output
+without sending it to a phone. Duplicate prepare requests for the same call
+share the one session; another call receives HTTP 409. A 180-second timer or
+an authenticated `GET /caller-vobiz/cancel/<call-id>` closes an unclaimed
+session. The Worker sends cancel after definite pre-dial failures and
+pre-answer hangups. These endpoints require a distinct short-lived V2 HMAC
+Bearer token bound to the call ID, outbound direction, expiry, and action;
+stream URL V1 tokens cannot authorize them. The token never appears in an
+action URL. A preparation failure prevents the Worker from dialing.
+
 As soon as the bridge verifies the signed WebSocket token and Vobiz `start`
 frame format, it plays a paced, clearly audible in-call connecting tone while
-checking the Worker call record, claiming the call, and starting that call's
-Codex GPT Live session. The bridge verifies the provider call ID against the
-Worker record before starting Codex. The tone
+checking the Worker call record and claiming the call. It verifies the
+provider call ID against the Worker record before attaching the prepared
+session and sending the GPT Live activation cue. If the reservation is missing
+or detected unhealthy **before attachment**, the bridge uses the existing
+in-call cold start path while the tone continues. A failure during or after
+activation ends the call; it does not risk replaying buffered or duplicate
+speech through a second session. An 8 kHz provider input is
+resampled into the prepared 16 kHz WebRTC input. Inbound calls continue to
+start only after the stream arrives. The tone
 uses the [published Indian local ringing cadence](https://www.itu.int/dms_pub/itu-t/opb/sp/T-SP-E.180-2010-PDF-E.pdf)
 (400 Hz with 25 Hz modulation, 0.4 s on, 0.2 s off, 0.4 s on, 2.0 s off).
 It uses 50 ms raw L16 chunks at 24 kHz. Before sending the first model speech
@@ -193,8 +224,8 @@ frame, the bridge sends `clearAudio` and waits for Vobiz's `clearedAudio`
 acknowledgement, so the greeting does not race a queued tone. A
 caller hangup or failed session stops the tone. This tone is played **after the
 PSTN call is answered**; the carrier controls the true ringback before answer.
-The bridge begins the Live session at the earliest authenticated media event
-available in this Vobiz path, not when the phone first starts ringing.
+The bridge logs only the call UUID and bounded prepare, attach, and first
+audio timing; it does not log the bearer token, phone number, or transcript.
 
 Vobiz documents [`StartApp`](https://www.vobiz.ai/docs/concepts/callbacks) at
 answer and executes [`<Stream>`](https://www.vobiz.ai/docs/xml/stream) after
@@ -221,12 +252,14 @@ short-lived signed `token` query parameter. The token is
 first_segment))`, where `direction` is `outbound` or `inbound`. The bridge checks
 it, then fetches
 `GET /v1/vobiz/bridge/calls/{id}` using `VOBIZ_RELAY_TOKEN`. The context must
-include `id`, `direction`, `vobiz_call_id`, `instructions`, and
-`opening_speech`; inbound context must also include the owned E.164
+include `id`, `direction`, `instructions`, and `opening_speech`;
+`vobiz_call_id` is unbound during pre-dial preparation and must be set before
+the answered stream is claimed. Inbound context must also include the owned E.164
 `called_number` and may include an unverified E.164 `caller_number`. The bridge
 compares the expected `vobiz_call_id` with
 Vobiz's `start.callId` and atomically claims the call at
-`POST /v1/vobiz/bridge/calls/{id}/claim` before starting Codex. This Worker
+`POST /v1/vobiz/bridge/calls/{id}/claim` before releasing prepared GPT Live
+speech or cold starting Codex. This Worker
 claim blocks token replay after a bridge restart.
 
 First test the DID binding with the Worker inbound flag off: valid signed

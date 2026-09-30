@@ -142,6 +142,9 @@ CONNECTING_TONE_RATE = 24000
 CONNECTING_TONE_FRAME_SECONDS = 0.05
 CONNECTING_TONE_CYCLE_FRAMES = 60
 CONNECTING_TONE_CLEAR_TIMEOUT_SECONDS = 3
+WEBRTC_DISCONNECT_GRACE_SECONDS = 5
+PREPARE_TIMEOUT_SECONDS = 38
+PREPARED_CALL_TTL_SECONDS = 180
 
 
 def validated_http_origin(value: str, name: str) -> str:
@@ -402,6 +405,37 @@ def verify_stream_token(token: str, secret: str, now: int | None = None) -> dict
     return payload
 
 
+def verify_action_token(token: str, secret: str, action: str,
+                        call_id: str, now: int | None = None) -> dict:
+    """Authorize one pre-dial action without accepting a stream token."""
+    if not token or len(token) > 1200 or not secret or len(secret) < 32:
+        raise ValueError("invalid_token")
+    try:
+        payload_part, signature_part = token.split(".", 1)
+        signature = _b64url_decode(signature_part)
+        expected = hmac.new(secret.encode(), payload_part.encode("ascii"), hashlib.sha256).digest()
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError("invalid_token")
+        payload = json.loads(_b64url_decode(payload_part))
+    except (UnicodeError, ValueError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError("invalid_token") from error
+    issued_now = int(time.time()) if now is None else now
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"v", "id", "exp", "direction", "action"}
+        or type(payload["v"]) is not int or payload["v"] != 2
+        or payload["direction"] != "outbound"
+        or payload["action"] != action
+        or payload["id"] != call_id
+        or not isinstance(payload["id"], str)
+        or not CALL_ID.fullmatch(payload["id"])
+        or type(payload["exp"]) is not int
+        or not issued_now <= payload["exp"] <= issued_now + MAX_TOKEN_SECONDS
+    ):
+        raise ValueError("invalid_token")
+    return payload
+
+
 def _mulaw_sample(value: int) -> int:
     value = (~value) & 0xFF
     sample = ((value & 0x0F) << 3) + 0x84
@@ -634,11 +668,17 @@ class CodexPSTNSession:
         self.last_voice_at = time.monotonic()
         self.first_audio = asyncio.Event()
         self.realtime_error = asyncio.Event()
+        self._prepared = False
+        self._activated = False
+        self._closing = False
+        self._disconnect_task: asyncio.Task | None = None
 
     def _notification(self, method: str, params: dict) -> None:
         if params.get("threadId") != self.thread_id:
             return
         if method == "thread/realtime/transcript/done":
+            if not self._activated:
+                return
             role = params.get("role")
             value = params.get("text")
             if role in {"user", "assistant"} and isinstance(value, str) and value.strip():
@@ -660,9 +700,25 @@ class CodexPSTNSession:
             print("[caller vobiz] Codex realtime error", file=sys.stderr)
 
     async def start(self) -> None:
+        await self.prepare()
+        await self.activate()
+
+    async def prepare(self) -> None:
+        """Open the Sol/WebRTC session while the destination is still ringing.
+
+        The remote audio track is drained continuously, but no output is sent
+        until attach() and activate() run after the authenticated Vobiz start.
+        """
+        if self._prepared:
+            return
         from aiortc import RTCPeerConnection, RTCSessionDescription
 
         backing_prompt, realtime_prompt = call_prompts(self.context)
+        realtime_prompt += (
+            "\n\nThe telephone is not connected yet. Remain silent until a control "
+            "message explicitly says the call is connected. Then speak the "
+            "required opening line and listen."
+        )
         workspace = pathlib.Path(DEFAULT_WORKSPACE)
         workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
         started = await self.app.request("thread/start", {
@@ -693,10 +749,28 @@ class CodexPSTNSession:
 
         @peer.on("connectionstatechange")
         def on_connection_state():
-            if peer.connectionState == "connected" and not connected_future.done():
-                connected_future.set_result(True)
-            if peer.connectionState in {"failed", "closed"} and not connected_future.done():
-                connected_future.set_exception(RuntimeError("codex_webrtc_failed"))
+            if self._closing:
+                return
+            if peer.connectionState == "connected":
+                if self._disconnect_task:
+                    self._disconnect_task.cancel()
+                    self._disconnect_task = None
+                if not connected_future.done():
+                    connected_future.set_result(True)
+            elif peer.connectionState == "disconnected":
+                if not self._disconnect_task or self._disconnect_task.done():
+                    self._disconnect_task = asyncio.create_task(
+                        self._fail_persistent_disconnect(peer, connected_future)
+                    )
+            elif peer.connectionState in {"failed", "closed"}:
+                if self._disconnect_task:
+                    self._disconnect_task.cancel()
+                    self._disconnect_task = None
+                if not connected_future.done():
+                    connected_future.set_exception(RuntimeError("codex_webrtc_failed"))
+                else:
+                    self.realtime_error.set()
+                    print("[caller vobiz] Codex WebRTC connection lost", file=sys.stderr)
 
         offer = await peer.createOffer()
         await peer.setLocalDescription(offer)
@@ -723,30 +797,67 @@ class CodexPSTNSession:
             await asyncio.wait_for(connected_future, timeout=25)
             remote_track = await asyncio.wait_for(remote_track_future, timeout=10)
             self.output_task = asyncio.create_task(self._forward_output(remote_track))
-            await self.app.request("thread/realtime/appendSpeech", {
-                "threadId": self.thread_id,
-                "text": "The call is connected. Say the required opening line now, then listen.",
-            })
-            audio_wait = asyncio.create_task(self.first_audio.wait())
-            error_wait = asyncio.create_task(self.realtime_error.wait())
-            try:
-                done, _ = await asyncio.wait(
-                    {audio_wait, error_wait, self.output_task}, timeout=15,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if error_wait in done:
-                    raise RuntimeError("codex_realtime_error")
-                if self.output_task in done:
-                    raise RuntimeError("codex_output_ended")
-                if audio_wait not in done:
-                    raise RuntimeError("codex_opening_audio_timeout")
-            finally:
-                audio_wait.cancel()
-                error_wait.cancel()
-                await asyncio.gather(audio_wait, error_wait, return_exceptions=True)
+            self._prepared = True
         except Exception:
             sdp_waiter.cancel()
             raise
+
+    async def _fail_persistent_disconnect(self, peer, connected_future: asyncio.Future) -> None:
+        try:
+            await asyncio.sleep(WEBRTC_DISCONNECT_GRACE_SECONDS)
+        except asyncio.CancelledError:
+            return
+        if self._closing or peer.connectionState != "disconnected":
+            return
+        if not connected_future.done():
+            connected_future.set_exception(RuntimeError("codex_webrtc_disconnected"))
+        else:
+            self.realtime_error.set()
+            print("[caller vobiz] Codex WebRTC connection lost", file=sys.stderr)
+
+    def attach(self, socket, stream_id: str, connecting_tone: CallConnectingTone,
+               l16_endian: str) -> None:
+        if not self._prepared or self._activated or self.socket is not None:
+            raise RuntimeError("codex_session_attach_invalid")
+        self.socket = socket
+        self.stream_id = stream_id
+        self.l16_endian = l16_endian
+        self.connecting_tone = connecting_tone
+        self._write_lock = connecting_tone.write_lock
+
+    async def activate(self) -> None:
+        """Release the opening only after Vobiz has answered and claimed it."""
+        if not self._prepared or not self.socket or not self.stream_id:
+            raise RuntimeError("codex_session_not_prepared")
+        if self._activated:
+            raise RuntimeError("codex_session_already_activated")
+        if self.realtime_error.is_set() or not self.output_task or self.output_task.done():
+            raise RuntimeError("codex_realtime_unavailable")
+        # The answered stream is already authenticated, claimed, and attached.
+        # Open the RTP gate before the request so the model's first syllable
+        # cannot be dropped if speech starts before the request acknowledgement.
+        self._activated = True
+        await self.app.request("thread/realtime/appendSpeech", {
+            "threadId": self.thread_id,
+            "text": "The call is connected. Say the required opening line now, then listen.",
+        })
+        audio_wait = asyncio.create_task(self.first_audio.wait())
+        error_wait = asyncio.create_task(self.realtime_error.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {audio_wait, error_wait, self.output_task}, timeout=15,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if error_wait in done:
+                raise RuntimeError("codex_realtime_error")
+            if self.output_task in done:
+                raise RuntimeError("codex_output_ended")
+            if audio_wait not in done:
+                raise RuntimeError("codex_opening_audio_timeout")
+        finally:
+            audio_wait.cancel()
+            error_wait.cancel()
+            await asyncio.gather(audio_wait, error_wait, return_exceptions=True)
 
     async def _forward_output(self, remote_track) -> None:
         from av import AudioResampler
@@ -761,7 +872,10 @@ class CodexPSTNSession:
                     while len(buffered) >= 960:
                         pcm = bytes(buffered[:960])
                         del buffered[:960]
-                        if self._clear_pending or time.monotonic() < self._suppress_output_until:
+                        if (
+                            not self._activated or self._clear_pending
+                            or time.monotonic() < self._suppress_output_until
+                        ):
                             continue
                         voice_rms = pcm_rms(pcm)
                         if self.connecting_tone:
@@ -862,6 +976,11 @@ class CodexPSTNSession:
         await self.stop_vobiz()
 
     async def close(self) -> None:
+        self._closing = True
+        if self._disconnect_task:
+            self._disconnect_task.cancel()
+            await asyncio.gather(self._disconnect_task, return_exceptions=True)
+            self._disconnect_task = None
         if self.output_task:
             self.output_task.cancel()
             await asyncio.gather(self.output_task, return_exceptions=True)
@@ -874,6 +993,13 @@ class CodexPSTNSession:
             self._unsubscribe()
         if self.peer:
             await self.peer.close()
+
+
+class PreparedCall:
+    def __init__(self, task: asyncio.Task):
+        self.task = task
+        self.expiry_task: asyncio.Task | None = None
+        self.created_at = time.monotonic()
 
 
 class VobizCodexBridge:
@@ -908,6 +1034,8 @@ class VobizCodexBridge:
         self.webrtc_verified = False
         self.used_tokens: dict[str, int] = {}
         self.active_calls: set[str] = set()
+        self.prepared_calls: dict[str, PreparedCall] = {}
+        self.prepare_lock = asyncio.Lock()
 
     @property
     def app_alive(self) -> bool:
@@ -919,7 +1047,15 @@ class VobizCodexBridge:
 
     @property
     def codex_ready(self) -> bool:
-        return self.app_alive and self.webrtc_verified and not self.active_calls
+        return (
+            self.runtime_ready
+            and not self.active_calls and not self.prepared_calls
+        )
+
+    @property
+    def runtime_ready(self) -> bool:
+        """Existing outbound calls may answer while this one-call bridge is reserved."""
+        return self.app_alive and self.webrtc_verified
 
     async def ensure_codex(self) -> AppServer:
         async with self.app_lock:
@@ -977,12 +1113,90 @@ class VobizCodexBridge:
         call_id = payload["id"]
         if self.active_calls:
             raise ValueError("bridge_busy")
+        if self.prepared_calls and call_id not in self.prepared_calls:
+            raise ValueError("bridge_busy")
         if payload["direction"] == "inbound" and not self.allow_inbound:
             raise ValueError("inbound_not_enabled")
         if call_id in self.used_tokens or call_id in self.active_calls:
             raise ValueError("replayed_stream_token")
         self.used_tokens[call_id] = payload["exp"]
         self.active_calls.add(call_id)
+
+    async def _create_prepared_session(self, call_id: str) -> CodexPSTNSession:
+        session = None
+        try:
+            async def prepare():
+                nonlocal session
+                context = await self.context(call_id, "outbound")
+                app = await self.ensure_codex()
+                session = CodexPSTNSession(
+                    app, None, "", context, VobizInputTrack(16000), self.l16_endian,
+                )
+                await session.prepare()
+                if session.realtime_error.is_set() or not session.output_task or session.output_task.done():
+                    raise RuntimeError("codex_realtime_unavailable")
+                return session
+
+            return await asyncio.wait_for(prepare(), timeout=PREPARE_TIMEOUT_SECONDS)
+        except BaseException:
+            if session:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+            raise
+
+    async def prepare_call(self, call_id: str) -> None:
+        async with self.prepare_lock:
+            if self.active_calls:
+                raise ValueError("bridge_busy")
+            record = self.prepared_calls.get(call_id)
+            if record is None:
+                if self.prepared_calls:
+                    raise ValueError("bridge_busy")
+                record = PreparedCall(asyncio.create_task(self._create_prepared_session(call_id)))
+                self.prepared_calls[call_id] = record
+                record.expiry_task = asyncio.create_task(self._expire_prepared(call_id, record))
+        try:
+            await asyncio.shield(record.task)
+            if self.prepared_calls.get(call_id) is not record:
+                raise RuntimeError("prepare_cancelled")
+            if record.task.done() and not record.task.cancelled():
+                print(
+                    f"[caller vobiz] call_id={call_id} phase=prepared "
+                    f"elapsed_ms={int((time.monotonic() - record.created_at) * 1000)}",
+                    file=sys.stderr,
+                )
+        except Exception:
+            await self.cancel_prepared(call_id, expected=record)
+            raise
+
+    async def _expire_prepared(self, call_id: str, record: PreparedCall) -> None:
+        try:
+            await asyncio.sleep(PREPARED_CALL_TTL_SECONDS)
+            await self.cancel_prepared(call_id, expected=record)
+        except asyncio.CancelledError:
+            pass
+
+    async def _discard_prepared(self, record: PreparedCall) -> None:
+        if not record.task.done():
+            record.task.cancel()
+        result = await asyncio.gather(record.task, return_exceptions=True)
+        if result and not isinstance(result[0], BaseException) and hasattr(result[0], "close"):
+            try:
+                await result[0].close()
+            except Exception as error:
+                print(f"[caller vobiz] prepared session cleanup failed: {type(error).__name__}", file=sys.stderr)
+
+    async def cancel_prepared(self, call_id: str, *, expected: PreparedCall | None = None) -> None:
+        async with self.prepare_lock:
+            record = self.prepared_calls.get(call_id)
+            if not record or (expected is not None and record is not expected):
+                return
+            self.prepared_calls.pop(call_id)
+            if record.expiry_task and record.expiry_task is not asyncio.current_task():
+                record.expiry_task.cancel()
+        await self._discard_prepared(record)
 
     async def context(self, call_id: str, direction: str) -> dict:
         status, data = await http_json(
@@ -1166,8 +1380,38 @@ class VobizCodexBridge:
                 "ok": True,
                 "service": "caller-vobiz-codex-bridge",
                 "codex_ready": self.codex_ready,
+                "runtime_ready": self.runtime_ready,
                 "inbound_enabled": self.allow_inbound,
             }) + "\n")
+        action_match = re.fullmatch(r"/(prepare|cancel)/([A-Za-z0-9_-]{1,80})", path.path)
+        if action_match:
+            action, call_id = action_match.groups()
+            # websockets.http11.Request represents only a parsed HTTP GET;
+            # non-GET methods are rejected by its parser before this hook.
+            if path.query or path.fragment:
+                return connection.respond(400, "Invalid action URL\n")
+            authorization = request.headers.get("Authorization", "")
+            if not authorization.startswith("Bearer "):
+                return connection.respond(401, "Unauthorized\n")
+            try:
+                verify_action_token(
+                    authorization[len("Bearer "):], self.stream_secret, action, call_id,
+                )
+            except ValueError:
+                return connection.respond(401, "Unauthorized\n")
+            if action == "cancel":
+                await self.cancel_prepared(call_id)
+                return connection.respond(200, '{"ok":true,"cancelled":true}\n')
+            try:
+                await self.prepare_call(call_id)
+            except ValueError as error:
+                if str(error) == "bridge_busy":
+                    return connection.respond(409, '{"ok":false,"error":"bridge_busy"}\n')
+                return connection.respond(503, '{"ok":false,"error":"prepare_failed"}\n')
+            except Exception as error:
+                print(f"[caller vobiz] prewarm failed: {type(error).__name__}", file=sys.stderr)
+                return connection.respond(503, '{"ok":false,"error":"prepare_failed"}\n')
+            return connection.respond(200, '{"ok":true,"prepared":true}\n')
         if path.path != "/vobiz":
             return connection.respond(404, "Not found\n")
         token = urllib.parse.parse_qs(path.query).get("token", [""])[0]
@@ -1189,6 +1433,9 @@ class VobizCodexBridge:
             await socket.close(code=1008, reason="unauthorized")
             return
         call_id = payload["id"]
+        prepared_record = self.prepared_calls.pop(call_id, None)
+        if prepared_record and prepared_record.expiry_task:
+            prepared_record.expiry_task.cancel()
         call_deadline = time.monotonic() + MAX_CALL_SECONDS
         session = None
         receiver = None
@@ -1217,6 +1464,7 @@ class VobizCodexBridge:
                 ("audio/x-l16", 8000), ("audio/x-l16", 16000), ("audio/x-mulaw", 8000)
             }:
                 raise RuntimeError("vobiz_media_format_unsupported")
+            answered_at = time.monotonic()
             # The signed WebSocket token and start frame have been checked.
             # Cover even the Worker context lookup with paced in-call audio.
             connecting_tone = CallConnectingTone(socket, stream_id, self.l16_endian)
@@ -1246,12 +1494,36 @@ class VobizCodexBridge:
             app = await asyncio.wait_for(
                 self.ensure_codex(), timeout=max(0, call_deadline - time.monotonic())
             )
-            input_track = VobizInputTrack(sample_rate)
-            session = CodexPSTNSession(app, socket, stream_id, context, input_track, self.l16_endian)
-            session.connecting_tone = connecting_tone
-            session._write_lock = connecting_tone.write_lock
+            if prepared_record:
+                session = await prepared_record.task
+                prepared_context = session.context
+                if (
+                    session.app is not app
+                    or any(prepared_context.get(key) != context.get(key) for key in (
+                        "direction", "instructions", "opening_speech", "codex_voice",
+                        "caller_number", "destination_number",
+                    ))
+                    or session.realtime_error.is_set() or not session.output_task
+                    or session.output_task.done()
+                ):
+                    await session.close()
+                    session = None
+                    prepared_record = None
+                else:
+                    session.attach(socket, stream_id, connecting_tone, self.l16_endian)
+                    print(
+                        f"[caller vobiz] call_id={call_id} phase=attached "
+                        f"prepared_age_ms={int((time.monotonic() - prepared_record.created_at) * 1000)}",
+                        file=sys.stderr,
+                    )
+            if session is None:
+                print(f"[caller vobiz] call_id={call_id} phase=cold_start", file=sys.stderr)
+                input_track = VobizInputTrack(sample_rate)
+                session = CodexPSTNSession(app, socket, stream_id, context, input_track, self.l16_endian)
+                session.connecting_tone = connecting_tone
+                session._write_lock = connecting_tone.write_lock
             receiver = asyncio.create_task(self._receive_media(socket, session, encoding, sample_rate))
-            startup = asyncio.create_task(session.start())
+            startup = asyncio.create_task(session.activate() if prepared_record else session.start())
             done, _ = await asyncio.wait(
                 {startup, receiver, deadline_task}, return_when=asyncio.FIRST_COMPLETED
             )
@@ -1266,6 +1538,12 @@ class VobizCodexBridge:
                     raise receiver.exception()
                 return
             await startup
+            print(
+                f"[caller vobiz] call_id={call_id} phase=first_audio "
+                f"answer_to_audio_ms={int((time.monotonic() - answered_at) * 1000)} "
+                f"mode={'prepared' if prepared_record else 'cold'}",
+                file=sys.stderr,
+            )
             await self.report(call_id, "connected")
             connected = True
             idle = asyncio.create_task(self._idle_watchdog(session))
@@ -1320,6 +1598,8 @@ class VobizCodexBridge:
                     await session.close()
                 except Exception as error:
                     print(f"[caller vobiz] cleanup failed: {type(error).__name__}", file=sys.stderr)
+            elif prepared_record:
+                await self._discard_prepared(prepared_record)
             self.active_calls.discard(call_id)
             if connected and not failed:
                 await self.finish_call(
@@ -1329,6 +1609,7 @@ class VobizCodexBridge:
     async def _receive_media(self, socket, session: CodexPSTNSession, encoding: str, sample_rate: int):
         speech_frames = 0
         last_clear = 0.0
+        input_resampler = None
         async for raw in socket:
             if not isinstance(raw, str) or len(raw.encode()) > MAX_WS_MESSAGE:
                 raise RuntimeError("vobiz_message_invalid")
@@ -1343,7 +1624,23 @@ class VobizCodexBridge:
                 if media.get("track", "inbound") != "inbound":
                     continue
                 pcm = decode_vobiz_audio(media.get("payload"), encoding, sample_rate, self.l16_endian)
-                session.input_track.push(pcm)
+                target_rate = session.input_track.sample_rate
+                if target_rate == sample_rate:
+                    session.input_track.push(pcm)
+                elif pcm:
+                    if input_resampler is None:
+                        from av import AudioResampler
+
+                        input_resampler = AudioResampler(format="s16", layout="mono", rate=target_rate)
+                    from av import AudioFrame
+
+                    input_frame = AudioFrame(format="s16", layout="mono", samples=len(pcm) // 2)
+                    input_frame.planes[0].update(pcm)
+                    input_frame.sample_rate = sample_rate
+                    for converted in input_resampler.resample(input_frame):
+                        session.input_track.push(
+                            bytes(converted.planes[0])[:converted.samples * 2]
+                        )
                 speaking = pcm_rms(pcm) > 900
                 speech_frames = speech_frames + 1 if speaking else 0
                 now = time.monotonic()
@@ -1390,6 +1687,7 @@ async def serve(bridge: VobizCodexBridge, host: str, port: int):
         async with websocket_serve(
             bridge.handle, host, port, process_request=bridge.process_request,
             max_size=MAX_WS_MESSAGE, max_queue=256, ping_interval=20, ping_timeout=20,
+            open_timeout=45,
         ):
             print(f"Caller Vobiz Codex bridge listening on {host}:{port}")
             await asyncio.Future()
@@ -1400,6 +1698,8 @@ async def serve(bridge: VobizCodexBridge, host: str, port: int):
         if notification_task:
             notification_task.cancel()
             await asyncio.gather(notification_task, return_exceptions=True)
+        for call_id in list(bridge.prepared_calls):
+            await bridge.cancel_prepared(call_id)
         if bridge.app:
             await bridge.app.close()
 
