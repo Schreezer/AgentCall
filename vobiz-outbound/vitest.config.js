@@ -19,6 +19,7 @@ export default defineConfig({
         VOBIZ_AUTH_ID: "test-auth",
         VOBIZ_AUTH_TOKEN: "test-vobiz-auth-token",
         VOBIZ_NUMBER: "+918071580171",
+        VOBIZ_INBOUND_CALLBACK_TOKEN: "AbCDefGHijKLmnopQRSTuvWXyz0123456789_-abcdc",
         VOBIZ_PUBLIC_BASE_URL: "https://relay.example",
         VOBIZ_BRIDGE_WSS_URL: "wss://bridge.example/vobiz",
         VOBIZ_OUTBOUND_ENABLED: "true",

@@ -14,14 +14,21 @@ acknowledgement itself; its call prompt tells it to delegate substantive
 recipient requests to the Sol thread and speak the result. There is no OpenAI
 API key or fallback provider.
 
-The bridge does **not** install or restart Hermes's gateway. Inbound calls are
-implemented behind `VOBIZ_BRIDGE_ALLOW_INBOUND=false`; the isolated Worker has
-its own disabled inbound switch. The purchased DID remains unattached and Jio
-forwarding remains unconfigured until live readiness is verified. The bridge
+The bridge does **not** install or restart Hermes's gateway. Inbound admission
+is now enabled on the DebianBat bridge and its public health reports Codex and
+runtime ready; the isolated Worker retains its disabled inbound switch. The purchased DID `+918071580171` is attached
+to the Vobiz `Hermes_Inbound` Application, but Jio forwarding remains
+unconfigured and no live inbound conversation has been proven. The bridge
 admits one call at a time.
 It holds audio only in short memory buffers; it does not save audio. Inbound
 calls send a bounded, digit-redacted report to the isolated Worker at call end.
 The bridge never writes the full transcript to its recovery spool.
+The inference-aware script is deployed on DebianBat and public health is ready;
+its pre-update backup is
+`/home/chirag/.config/caller-vobiz-backups/20260930T090107Z-inferred-reason-v2`.
+A synthetic post-call Sol inference using Hermes credentials returned a grounded
+result with the required inferred, unverified label. A real inbound phone
+callback, conversation, and Telegram alert remain unproven.
 
 ## Runtime
 
@@ -47,6 +54,7 @@ Required service environment:
 | `VOBIZ_BRIDGE_ALLOW_INBOUND` | Explicit inbound opt-in; defaults to `false` |
 | `VOBIZ_BRIDGE_SPOOL_DIR` | Optional absolute path for durable inbound terminal reports; defaults to `/home/chirag/.local/state/caller-vobiz-bridge/terminal-events` on DebianBat |
 | `CALLER_RELAY_URL`, `CALLER_AGENT_TOKEN` | Optional paired Caller relay origin and agent token for a short iPhone message after a completed inbound call; set both or neither |
+| `HERMES_SEND_EXECUTABLE`, `HERMES_NOTIFICATION_TARGET` | Optional direct owner alert through an absolute `hermes` executable and one explicit `telegram:<chat-id>` target; set both or neither. When configured, this takes precedence over Caller relay. |
 
 Resolve the DebianBat paths from `readlink -f` on the installed Codex and Node
 executables, then point `VOBIZ_CODEX_PACKAGE_ROOT` at the narrow CLI package
@@ -91,7 +99,7 @@ directory as a mode-0600 file. The spool is limited to 256 events of at most
 4 KiB each. A directory with weaker permissions prevents startup; a full spool
 prevents another inbound report from being silently discarded. After an outage,
 the bridge retries stored events at startup and every 30 seconds, even if
-Caller notification credentials are absent or inbound answering has been
+owner-notification credentials are absent or inbound answering has been
 temporarily disabled. It removes a file only after the Worker accepts the
 event with HTTP 200 or 202. A duplicate attempt uses the original stored
 report and the same per-call event idempotency key. The service needs a writable
@@ -101,21 +109,38 @@ suitable for this spool.
 For inbound calls, the Vobiz Worker owns the durable notification outbox. Once
 the ended event is stored, the bridge claims due alerts at startup, every 30
 seconds, and immediately after a completed inbound call. The Worker supplies
-either a short `Caller said (unverified): …` excerpt derived from the stored
-inbound report or a generic fallback when no meaningful reason was captured.
+either a short `Likely reason (inferred, unverified): …` result, an attributed
+`Caller said (unverified): …` excerpt, or a generic fallback when no meaningful
+reason was captured.
 The bridge accepts only that bounded, single-line, digit-free message or the
-fixed fallback, then sends it to Caller with `vobiz-inbound-{call-id}` as the
-relay idempotency key. It acknowledges the Worker item only after relay
-acceptance. The alert contains neither the full transcript nor the caller's
-number; the excerpt is unverified caller speech, not a verified reason or an
-instruction to Hermes. It is an excerpt, not a semantic summary. A process or
-network failure leaves the item pending for a later retry. Caller credentials
-are optional; when they are absent, the bridge does not claim anything and
-pending items stay in D1. A malformed claimed item or a permanent Caller relay
+fixed fallback. With both Hermes settings present, it invokes the pinned
+executable as `hermes send` for one fixed Telegram chat, checks the structured
+success response, and acknowledges the Worker item only after acceptance. It
+neutralizes `MEDIA:` and bracketed control directives before delivery, so the
+unverified caller excerpt cannot become a Hermes attachment or command. This
+uses DebianBat's existing Hermes credentials and never starts another gateway
+or Telegram poller.
+
+Before acknowledging the Worker, Hermes mode writes a mode-0600 accepted-send
+receipt below a mode-0700 state directory keyed by call ID. On a later retry,
+that receipt suppresses another Telegram send and lets the bridge retry only
+the Worker acknowledgement. This is best-effort duplicate reduction: a crash
+after Telegram accepts the message but before the receipt is durably written
+can still produce a duplicate. After acknowledgement, the receipt is removed.
+
+If Hermes mode is unset, the bridge sends the alert to Caller with
+`vobiz-inbound-{call-id}` as the relay idempotency key. The alert contains
+neither the full transcript nor the caller's number; the excerpt is attributed,
+unverified caller speech, not a verified reason or an instruction to Hermes.
+An inferred reason retains its explicit label and remains unverified. A process or
+network failure leaves the item pending for a later retry. If neither complete
+Hermes nor Caller configuration is present, the bridge does not claim anything
+and pending items stay in D1. A malformed claimed item or a permanent Caller relay
 400, 409, or 422 response is marked failed in the Worker so it cannot block
 later alerts; authentication failures and transient errors remain pending.
-Worker `owner_notification_status=sent` means Caller accepted or queued the alert;
-it does not prove APNs delivery or that the iPhone displayed it.
+Worker `owner_notification_status=sent` means the configured delivery command
+or relay accepted the alert; it does not prove the owner read it or that an
+iPhone displayed it.
 
 Run the isolated service with:
 
@@ -269,22 +294,34 @@ so the stream fails closed. A remote `/claim` records the attachment in the
 Worker in the background; the provider Hangup and terminal bridge event can
 still record the outcome if that claim is late.
 
-First test the DID binding with the Worker inbound flag off: valid signed
-callbacks are recorded as `blocked_disabled`, while Answer returns `<Hangup/>`.
-After confirming Vobiz signs both callbacks and the public WSS path is healthy,
-enable the bridge inbound flag and then the Worker's inbound flag for a
-controlled conversation test. Vobiz number binding changes where incoming
-calls route immediately. A forwarded
+The DID is already attached to `Hermes_Inbound`. First test that binding with
+the Worker inbound flag off: authenticated callbacks are recorded as
+`blocked_disabled`, while Answer returns `<Hangup/>`. Fixed callback routes
+remain HMAC-only. Token-suffixed routes accept one confidential, canonical
+43-character bearer for providers that omit signature headers; if headers are
+present, their HMAC must still validate. After callback proof, direct Hermes
+delivery configuration, and healthy public WSS readiness, enable the bridge
+inbound flag and then the Worker's inbound flag for a controlled conversation
+test. Vobiz number binding changes where incoming calls route immediately. A forwarded
 Jio call cannot be distinguished from a direct DID call using caller ID alone,
 so both use the same message-taking policy.
 
 The bridge reports `connected`, `ended`, or `failed` to
 `POST /v1/vobiz/bridge/calls/{id}/events`. Outbound `ended` carries a bounded,
-digit-redacted excerpt of recipient speech. Inbound `ended` includes a
-maximum 500-character `inbound_report` made from the caller's own words, with
-digits redacted, plus a bounded summary copied from that report. This is
-evidence of what was heard, not a semantic interpretation or a claim that
-the message was delivered or acknowledged. Unknown callers get no Hermes
+digit-redacted excerpt of recipient speech. For inbound calls, the bridge first
+fsyncs a maximum 500-character, digit-redacted report made from the caller's
+own words. It then gives a bounded set of redacted caller turns to a fresh,
+ephemeral `gpt-6-sol` thread with a read-only sandbox, no environments,
+capability roots, dynamic tools, provider fallback, or caller-independent
+context. The whole post-call inference gets 20 seconds. Its structured output
+must include evidence that is an exact substring of a supplied caller turn;
+otherwise it is rejected. A valid result atomically replaces the durable quote
+and is labeled `Likely reason (inferred, unverified):` in the report and owner
+alert. Timeout, cancellation, validation failure, model error, or a process
+restart leaves the already-durable caller quote as the fallback. No useful
+speech retains the generic fallback. This inference path is deployed and its
+Hermes-authenticated Sol request succeeded synthetically, but it has not been
+proven with a live inbound phone call. Unknown callers get no Hermes
 tools or private context. Inbound callers hear a fixed greeting that identifies
 the speaker as Chirag's AI assistant and offers to take a message. The agent
 asks why the person called and records a brief message; it accepts a name if
@@ -310,14 +347,13 @@ without holding the health/WebSocket listener closed. Outbound prewarming
 fails before dialing if the spool is absent or full. This protects terminal
 report delivery; it cannot keep a live media stream alive during a Wi-Fi outage.
 
-If the optional Caller relay URL and token are present, a completed inbound
-call queues one durable outbox item. The bridge delivers one idempotent
-`message` mode alert through the paired Caller app and acknowledges the item
-only after Caller accepts it. Its text is a short, digit-free excerpt labeled
-as unverified caller speech, or a generic fallback if no useful reason was
-captured. It contains no caller number or full transcript. The excerpt may be
-visible in lock-screen previews. Relay acceptance does not prove the iPhone
-displayed the alert.
+If either direct Hermes Telegram delivery or the paired Caller fallback is
+configured, a completed inbound call queues one durable outbox item. Its text
+is a short, digit-free inferred reason with the explicit unverified label, an
+attributed caller quote, or a generic fallback if no useful reason was captured.
+It contains no caller number or full transcript. Hermes mode takes precedence and sends to the fixed Telegram chat;
+Caller mode uses an idempotent `message` alert. Acceptance by either path does
+not prove that the owner read or saw the alert.
 
 ### Model verification
 

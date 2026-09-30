@@ -10,6 +10,7 @@ const NOTIFICATION_CLAIM_DELAY_MS = 30_000;
 const NOTIFICATION_MESSAGE = "Hermes answered an incoming call. Ask Hermes for the call result.";
 const INBOUND_REPORT_PREFIX = "Caller said: ";
 const NOTIFICATION_REPORT_PREFIX = "Caller said (unverified): ";
+const INFERRED_REASON_PREFIX = "Likely reason (inferred, unverified): ";
 const NOTIFICATION_MAX_CHARS = 180;
 const OUTBOUND_OPENING = "Hello, I'm Chirag's AI assistant, calling on his behalf. Is this a good time?";
 const INBOUND_OPENING = "Hello, I'm Chirag's AI assistant. May I take a message for him?";
@@ -67,6 +68,24 @@ async function secretEqual(supplied, secret) {
   ]);
   const signature = await crypto.subtle.sign("HMAC", candidate, challenge);
   return crypto.subtle.verify("HMAC", expected, signature, challenge);
+}
+
+function canonical256BitToken(value) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) return false;
+  try {
+    const bytes = Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/") + "="),
+      (character) => character.charCodeAt(0));
+    return bytes.byteLength === 32 &&
+      btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") === value;
+  } catch {
+    return false;
+  }
+}
+
+async function validInboundCallbackToken(supplied, secret) {
+  if (!canonical256BitToken(supplied) || !canonical256BitToken(secret)) return false;
+  // Web Crypto verifies a fixed-size HMAC without a JavaScript string comparison.
+  return secretEqual(supplied, secret);
 }
 
 function normalizedNumber(value) {
@@ -654,7 +673,7 @@ async function boundedText(request, limit) {
 }
 
 async function verifiedCallback(request, env, requireSignature = false,
-  onReject = /** @type {(reason: string) => void} */ (() => {})) {
+  onReject = /** @type {(reason: string) => void} */ (() => {}), options = {}) {
   const reject = (reason) => { onReject(reason); return null; };
   const origin = baseURL(env);
   const url = new URL(request.url);
@@ -663,12 +682,19 @@ async function verifiedCallback(request, env, requireSignature = false,
   const hasSignatureHeader = request.headers.has("x-vobiz-signature-v3") ||
     request.headers.has("x-vobiz-signature-v2");
   if (requireSignature && !hasSignatureHeader) return reject("signature_missing");
+  if (options.verifyAllSignatures && ["v3", "v2"].some((version) =>
+    request.headers.has(`x-vobiz-signature-${version}-nonce`) &&
+    !request.headers.has(`x-vobiz-signature-${version}`))) return reject("signature_missing");
   let nonce = null;
-  if (hasSignatureHeader) {
-    const version = request.headers.has("x-vobiz-signature-v3") ? "v3" : "v2";
+  const versions = hasSignatureHeader
+    ? (options.verifyAllSignatures
+      ? ["v3", "v2"].filter((version) => request.headers.has(`x-vobiz-signature-${version}`))
+      : [request.headers.has("x-vobiz-signature-v3") ? "v3" : "v2"])
+    : [];
+  for (const version of versions) {
     const signature = request.headers.get(`x-vobiz-signature-${version}`);
-    nonce = request.headers.get(`x-vobiz-signature-${version}-nonce`);
-    if (!signature || !/^\d{20}$/.test(nonce || "")) return reject("signature_nonce_invalid");
+    const versionNonce = request.headers.get(`x-vobiz-signature-${version}-nonce`);
+    if (!signature || !/^\d{20}$/.test(versionNonce || "")) return reject("signature_nonce_invalid");
     let signatureBytes;
     try {
       signatureBytes = Uint8Array.from(atob(signature), (character) => character.charCodeAt(0));
@@ -680,10 +706,11 @@ async function verifiedCallback(request, env, requireSignature = false,
       "raw", new TextEncoder().encode(env.VOBIZ_AUTH_TOKEN),
       { name: "HMAC", hash: "SHA-256" }, false, ["verify"],
     );
-    const message = `${origin}${url.pathname}${version === "v3" ? "." : ""}${nonce}`;
+    const message = `${origin}${url.pathname}${version === "v3" ? "." : ""}${versionNonce}`;
     if (!(await crypto.subtle.verify("HMAC", key, signatureBytes, new TextEncoder().encode(message)))) {
       return reject("signature_mismatch");
     }
+    nonce ??= versionNonce;
   }
   let raw;
   try {
@@ -695,6 +722,7 @@ async function verifiedCallback(request, env, requireSignature = false,
     return reject("content_type_invalid");
   }
   const params = new URLSearchParams(raw);
+  if (options.onRawBody) options.onRawBody(raw);
   if (requireSignature) {
     const authIDs = params.getAll("auth_id");
     if (!authIDs.length) return reject("auth_id_missing");
@@ -706,7 +734,8 @@ async function verifiedCallback(request, env, requireSignature = false,
   if (nonce) {
     // Inbound Answer URLs are fixed and have no per-call secret. Retain their signed
     // nonces so a captured URL signature cannot be reused with a new form body later.
-    const nonceTable = requireSignature ? "vobiz_inbound_callback_nonces" : "vobiz_callback_nonces";
+    const nonceTable = requireSignature || options.verifyAllSignatures
+      ? "vobiz_inbound_callback_nonces" : "vobiz_callback_nonces";
     const bodyHash = await hashCredential(raw);
     const pathHash = await hashCredential(url.pathname);
     const reserved = await env.DB.prepare(
@@ -719,7 +748,7 @@ async function verifiedCallback(request, env, requireSignature = false,
       ).bind(nonce).first();
       if (prior?.path_hash !== pathHash || prior?.body_hash !== bodyHash) return reject("nonce_replay_mismatch");
     }
-    if (!requireSignature) {
+    if (!requireSignature && !options.verifyAllSignatures) {
       // Outbound callbacks also carry a unique per-call URL token.
       try {
         await env.DB.prepare("DELETE FROM vobiz_callback_nonces WHERE received_at < ?1")
@@ -730,6 +759,22 @@ async function verifiedCallback(request, env, requireSignature = false,
     }
   }
   return params;
+}
+
+async function reserveInboundTokenCallback(env, kind, providerUUID, path, rawBody) {
+  const nonce = `token:${kind}:${providerUUID}`;
+  const [pathHash, bodyHash] = await Promise.all([
+    hashCredential(path), hashCredential(rawBody),
+  ]);
+  const inserted = await env.DB.prepare(
+    `INSERT INTO vobiz_inbound_callback_nonces (nonce, path_hash, body_hash, received_at)
+     VALUES (?1, ?2, ?3, ?4) ON CONFLICT(nonce) DO NOTHING`,
+  ).bind(nonce, pathHash, bodyHash, Date.now()).run();
+  if (inserted.meta.changes) return true;
+  const prior = await env.DB.prepare(
+    "SELECT path_hash, body_hash FROM vobiz_inbound_callback_nonces WHERE nonce = ?1",
+  ).bind(nonce).first();
+  return prior?.path_hash === pathHash && prior?.body_hash === bodyHash;
 }
 
 export async function handleVobizCallback(request, env, kind, callID, callbackToken, fetcher = fetch) {
@@ -913,17 +958,33 @@ function inboundProviderStatus(params) {
   return [callStatus, hangupCause].filter(Boolean).join(":").slice(0, 80) || "hangup";
 }
 
-export async function handleInboundCallback(request, env, kind, fetcher = fetch) {
+export async function handleInboundCallback(request, env, kind, fetcher = fetch, callbackToken = null) {
   if (!["answer", "hangup"].includes(kind)) return json(404, { error: "not_found" });
   if (!inboundConfigured(env) || !baseURL(env) || !bridgeURL(env)) {
     return json(503, { error: "vobiz_inbound_not_configured" });
   }
-  // Voice Application URLs are fixed, so every inbound callback must have a V2/V3 HMAC.
-  // Vobiz signs URL + nonce, not the form body; the nonce table binds each retry to its first body.
-  const params = await verifiedCallback(request, env, true);
+  const tokenRoute = callbackToken !== null;
+  if (tokenRoute && new URL(request.url).pathname !==
+      `/v1/vobiz/inbound/${kind}/${callbackToken}`) {
+    return json(403, { error: "invalid_vobiz_callback" });
+  }
+  if (tokenRoute && !(await validInboundCallbackToken(callbackToken, env.VOBIZ_INBOUND_CALLBACK_TOKEN))) {
+    return json(403, { error: "invalid_vobiz_callback" });
+  }
+  // Vobiz signs URL + nonce, not the form body. The fixed route requires HMAC;
+  // the optional token URL binds one CallUUID and event to its first exact body.
+  let rawBody = null;
+  const params = await verifiedCallback(request, env, !tokenRoute, () => {}, {
+    verifyAllSignatures: tokenRoute,
+    onRawBody: (raw) => { rawBody = raw; },
+  });
   if (!params) return json(403, { error: "invalid_vobiz_callback" });
   const fields = inboundCallbackFields(params, kind, env);
   if (!fields) return json(403, { error: "vobiz_inbound_call_mismatch" });
+  if (tokenRoute && (typeof rawBody !== "string" || !(await reserveInboundTokenCallback(
+    env, kind, fields.providerUUID, new URL(request.url).pathname, rawBody)))) {
+    return json(403, { error: "invalid_vobiz_callback" });
+  }
   if (env.VOBIZ_INBOUND_ENABLED !== "true") {
     const now = Date.now();
     await env.DB.prepare(
@@ -1088,21 +1149,25 @@ function cleanSummary(value) {
 }
 
 function callerNotificationMessage(report) {
-  if (typeof report !== "string" || !report.startsWith(INBOUND_REPORT_PREFIX)) {
-    return NOTIFICATION_MESSAGE;
-  }
-  const speech = report.slice(INBOUND_REPORT_PREFIX.length).normalize("NFC")
+  const sourcePrefix = typeof report === "string" && report.startsWith(INBOUND_REPORT_PREFIX)
+    ? INBOUND_REPORT_PREFIX
+    : typeof report === "string" && report.startsWith(INFERRED_REASON_PREFIX)
+      ? INFERRED_REASON_PREFIX : null;
+  if (!sourcePrefix) return NOTIFICATION_MESSAGE;
+  const notificationPrefix = sourcePrefix === INBOUND_REPORT_PREFIX
+    ? NOTIFICATION_REPORT_PREFIX : INFERRED_REASON_PREFIX;
+  const excerptText = report.slice(sourcePrefix.length).normalize("NFC")
     .replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu, " ")
     .replace(/\p{N}+/gu, "[number omitted]")
     .replace(/\s+/gu, " ").trim();
-  const substantiveSpeech = speech.replace(/\[(?:number|code) omitted\]/gu, "");
-  if (!/\p{L}/u.test(substantiveSpeech)) {
+  const substantiveText = excerptText.replace(/\[(?:number|code) omitted\]/gu, "");
+  if (!/\p{L}/u.test(substantiveText)) {
     return NOTIFICATION_MESSAGE;
   }
 
-  const maxExcerptChars = NOTIFICATION_MAX_CHARS - [...NOTIFICATION_REPORT_PREFIX].length;
-  const excerpt = truncateUnicode(speech, maxExcerptChars);
-  return excerpt ? `${NOTIFICATION_REPORT_PREFIX}${excerpt}` : NOTIFICATION_MESSAGE;
+  const maxExcerptChars = NOTIFICATION_MAX_CHARS - [...notificationPrefix].length;
+  const excerpt = truncateUnicode(excerptText, maxExcerptChars);
+  return excerpt ? `${notificationPrefix}${excerpt}` : NOTIFICATION_MESSAGE;
 }
 
 export async function bridgeCallEvent(request, env, callID) {
@@ -1320,6 +1385,13 @@ const worker = {
       const inboundCallback = url.pathname.match(/^\/v1\/vobiz\/inbound\/(answer|hangup)$/);
       if (request.method === "POST" && inboundCallback) {
         return await handleInboundCallback(request, env, inboundCallback[1]);
+      }
+      const inboundTokenCallback = url.pathname.match(
+        /^\/v1\/vobiz\/inbound\/(answer|hangup)\/([A-Za-z0-9_-]{43})$/,
+      );
+      if (request.method === "POST" && inboundTokenCallback) {
+        return await handleInboundCallback(request, env, inboundTokenCallback[1], fetch,
+          inboundTokenCallback[2]);
       }
 
       const callback = url.pathname.match(/^\/v1\/vobiz\/(answer|ring|hangup)\/([0-9a-f-]+)\/([A-Za-z0-9_-]{43})$/i);

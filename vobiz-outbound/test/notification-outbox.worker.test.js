@@ -99,6 +99,35 @@ describe("durable Caller notification outbox", () => {
     expect(item.message.length).toBeLessThan(500);
   });
 
+  it("labels a Sol-inferred reason as unverified, redacts it, and freezes the short alert", async () => {
+    await seedInbound();
+    const reason = "मेरा अपॉइंटमेंट बदलने के लिए कॉल किया; कृपया +91 9855145900 पर वापस फ़ोन करें। "
+      .repeat(12) + "\u202e\u0007";
+    expect((await report("ended", `Likely reason (inferred, unverified): ${reason}`, {
+      summary: "Private Hermes context must never appear in the alert.",
+    })).status).toBe(200);
+    const first = (await (await claim()).json()).notification;
+    expect(first.message).toMatch(/^Likely reason \(inferred, unverified\): मेरा अपॉइंटमेंट/);
+    expect(first.message).not.toContain("Caller said");
+    expect(first.message).not.toContain("Private Hermes context");
+    expect(first.message).not.toContain("9855145900");
+    expect(first.message).toContain("[number omitted]");
+    expect(first.message).not.toMatch(/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{N}]/u);
+    expect([...first.message].length).toBeLessThanOrEqual(180);
+    expect((await report("ended", "Likely reason (inferred, unverified): New claim after delivery."))
+      .status).toBe(200);
+    const saved = await env.DB.prepare(
+      "SELECT inbound_report FROM vobiz_inbound_calls WHERE id = ?1",
+    ).bind(CALL_ID).first();
+    expect(saved.inbound_report).toContain("मेरा अपॉइंटमेंट");
+    expect(saved.inbound_report).not.toContain("9855145900");
+    expect(saved.inbound_report).not.toContain("New claim after delivery");
+    const queued = await env.DB.prepare(
+      "SELECT message FROM vobiz_caller_notification_outbox WHERE call_id = ?1",
+    ).bind(CALL_ID).first();
+    expect(queued.message).toBe(first.message);
+  });
+
   it("redacts long, separated, and non-ASCII numbers before saving reports and summaries", async () => {
     await seedInbound();
     const callerSpeech = "Caller said: मेरा अपॉइंटमेंट बदलना है। Call +91 (9855) 145-900 " +
@@ -130,6 +159,14 @@ describe("durable Caller notification outbox", () => {
   it("uses the generic alert for a caller message containing only a redacted number", async () => {
     await seedInbound();
     expect((await report("ended", "Caller said: १२३४५६")).status).toBe(200);
+    const item = (await (await claim()).json()).notification;
+    expect(item.message).toBe("Hermes answered an incoming call. Ask Hermes for the call result.");
+  });
+
+  it("uses the generic alert for an inferred reason containing only a redacted number", async () => {
+    await seedInbound();
+    expect((await report("ended", "Likely reason (inferred, unverified): १२३४५६"))
+      .status).toBe(200);
     const item = (await (await claim()).json()).notification;
     expect(item.message).toBe("Hermes answered an incoming call. Ask Hermes for the call result.");
   });

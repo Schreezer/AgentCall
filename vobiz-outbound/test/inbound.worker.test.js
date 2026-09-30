@@ -9,6 +9,20 @@ const DID = "+918071580171";
 const CALLER = "+919000000001";
 const ANSWER_PATH = "/v1/vobiz/inbound/answer";
 const HANGUP_PATH = "/v1/vobiz/inbound/hangup";
+const CALLBACK_TOKEN = "AbCDefGHijKLmnopQRSTuvWXyz0123456789_-abcdc";
+const TOKEN_ANSWER_PATH = `${ANSWER_PATH}/${CALLBACK_TOKEN}`;
+const TOKEN_HANGUP_PATH = `${HANGUP_PATH}/${CALLBACK_TOKEN}`;
+
+function unsignedCallback(path, event, callUUID = crypto.randomUUID(), overrides = {}) {
+  return new Request(`https://relay.example${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      Event: event, CallUUID: callUUID, Direction: "inbound", From: CALLER,
+      To: DID, auth_id: "test-auth", ...overrides,
+    }),
+  });
+}
 
 async function signedCallback(path, event, nonce, overrides = {}, options = {}) {
   const fields = {
@@ -279,5 +293,120 @@ describe("signed Vobiz inbound relay", () => {
     expect(hangup.status).toBe(200);
     const row = await env.DB.prepare("SELECT status, bridge_connected_at FROM vobiz_inbound_calls").first();
     expect(row).toMatchObject({ status: "failed", bridge_connected_at: null });
+  });
+
+  it("accepts the exact 256-bit token URL while disabled and fails closed for missing or wrong secrets", async () => {
+    const callUUID = crypto.randomUUID();
+    const accepted = await SELF.fetch(unsignedCallback(TOKEN_ANSWER_PATH, "StartApp", callUUID));
+    expect(accepted.status).toBe(200);
+    expect(await accepted.text()).toContain("<Hangup/>");
+    expect((await env.DB.prepare("SELECT status FROM vobiz_inbound_calls").first()).status)
+      .toBe("blocked_disabled");
+
+    const wrongToken = CALLBACK_TOKEN.slice(0, -1) + "g";
+    expect((await SELF.fetch(unsignedCallback(
+      `${ANSWER_PATH}/${wrongToken}`, "StartApp", crypto.randomUUID(),
+    ))).status).toBe(403);
+    expect((await handleInboundCallback(
+      unsignedCallback(TOKEN_ANSWER_PATH, "StartApp"),
+      { ...enabledEnv(), VOBIZ_INBOUND_CALLBACK_TOKEN: undefined },
+      "answer", healthyBridge, CALLBACK_TOKEN,
+    )).status).toBe(403);
+    expect((await handleInboundCallback(
+      unsignedCallback(TOKEN_ANSWER_PATH, "StartApp"),
+      { ...enabledEnv(), VOBIZ_INBOUND_CALLBACK_TOKEN: "short" },
+      "answer", healthyBridge, CALLBACK_TOKEN,
+    )).status).toBe(403);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS count FROM vobiz_inbound_calls").first()).count)
+      .toBe(1);
+  });
+
+  it("binds unsigned Answer and Hangup retries to one exact body per call UUID and event", async () => {
+    const local = { ...enabledEnv(), VOBIZ_INBOUND_CALLBACK_TOKEN: CALLBACK_TOKEN };
+    const callUUID = crypto.randomUUID();
+    const answer = await handleInboundCallback(
+      unsignedCallback(TOKEN_ANSWER_PATH, "StartApp", callUUID),
+      local, "answer", healthyBridge, CALLBACK_TOKEN,
+    );
+    expect(answer.status).toBe(200);
+    expect(await answer.text()).toContain("<Stream");
+    const retry = await handleInboundCallback(
+      unsignedCallback(TOKEN_ANSWER_PATH, "StartApp", callUUID),
+      local, "answer", healthyBridge, CALLBACK_TOKEN,
+    );
+    expect(retry.status).toBe(200);
+    const altered = await handleInboundCallback(
+      unsignedCallback(TOKEN_ANSWER_PATH, "StartApp", callUUID, { From: "+919999999999" }),
+      local, "answer", healthyBridge, CALLBACK_TOKEN,
+    );
+    expect(altered.status).toBe(403);
+    const hangup = await handleInboundCallback(
+      unsignedCallback(TOKEN_HANGUP_PATH, "Hangup", callUUID),
+      local, "hangup", fetch, CALLBACK_TOKEN,
+    );
+    expect(hangup.status).toBe(200);
+    const changedHangup = await handleInboundCallback(
+      unsignedCallback(TOKEN_HANGUP_PATH, "Hangup", callUUID,
+        { CallStatus: "failed" }),
+      local, "hangup", fetch, CALLBACK_TOKEN,
+    );
+    expect(changedHangup.status).toBe(403);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS count FROM vobiz_inbound_calls").first()).count)
+      .toBe(1);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS count FROM vobiz_inbound_callback_nonces").first()).count)
+      .toBe(2);
+  });
+
+  it("rejects a token callback with the wrong DID, account, direction, event, or UUID", async () => {
+    const local = { ...enabledEnv(), VOBIZ_INBOUND_CALLBACK_TOKEN: CALLBACK_TOKEN };
+    const invalidCases = [
+      { To: "+919999999999" },
+      { auth_id: "another-account" },
+      { Direction: "outbound" },
+      { Event: "Hangup" },
+      { CallUUID: "not-a-uuid" },
+    ];
+    for (const fields of invalidCases) {
+      const response = await handleInboundCallback(
+        unsignedCallback(TOKEN_ANSWER_PATH, "StartApp", crypto.randomUUID(), fields),
+        local, "answer", healthyBridge, CALLBACK_TOKEN,
+      );
+      expect(response.status).toBe(403);
+    }
+    const queried = new Request(`https://relay.example${TOKEN_ANSWER_PATH}?extra=1`, {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ Event: "StartApp", CallUUID: crypto.randomUUID(),
+        Direction: "inbound", To: DID, auth_id: "test-auth" }),
+    });
+    expect((await handleInboundCallback(queried, local, "answer", healthyBridge,
+      CALLBACK_TOKEN)).status).toBe(403);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS count FROM vobiz_inbound_calls").first()).count)
+      .toBe(0);
+  });
+
+  it("rejects invalid V2 or V3 HMAC headers even when the token is valid", async () => {
+    const local = { ...enabledEnv(), VOBIZ_INBOUND_CALLBACK_TOKEN: CALLBACK_TOKEN };
+    const badV3 = unsignedCallback(TOKEN_ANSWER_PATH, "StartApp");
+    badV3.headers.set("x-vobiz-signature-v3", btoa("invalid"));
+    badV3.headers.set("x-vobiz-signature-v3-nonce", "12345678901234567890");
+    expect((await handleInboundCallback(badV3, local, "answer", healthyBridge,
+      CALLBACK_TOKEN)).status).toBe(403);
+
+    const validV3BadV2 = await signedCallback(TOKEN_ANSWER_PATH, "StartApp",
+      "12345678901234567891", {}, { callUUID: crypto.randomUUID() });
+    validV3BadV2.headers.set("x-vobiz-signature-v2", btoa("invalid"));
+    validV3BadV2.headers.set("x-vobiz-signature-v2-nonce", "12345678901234567892");
+    expect((await handleInboundCallback(validV3BadV2, local, "answer", healthyBridge,
+      CALLBACK_TOKEN)).status).toBe(403);
+    const nonceOnly = unsignedCallback(TOKEN_ANSWER_PATH, "StartApp");
+    nonceOnly.headers.set("x-vobiz-signature-v2-nonce", "12345678901234567893");
+    expect((await handleInboundCallback(nonceOnly, local, "answer", healthyBridge,
+      CALLBACK_TOKEN)).status).toBe(403);
+    const signedToken = await signedCallback(TOKEN_ANSWER_PATH, "StartApp",
+      "12345678901234567894", {}, { callUUID: crypto.randomUUID() });
+    expect((await handleInboundCallback(signedToken, local, "answer", healthyBridge,
+      CALLBACK_TOKEN)).status).toBe(200);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS count FROM vobiz_inbound_calls").first()).count)
+      .toBe(1);
   });
 });

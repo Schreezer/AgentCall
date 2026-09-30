@@ -9,6 +9,7 @@ import tempfile
 import time
 import types
 import unittest
+from html.parser import HTMLParser
 
 
 sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "scripts"))
@@ -116,6 +117,210 @@ class VobizBridgeTests(unittest.TestCase):
         self.assertLessEqual(len(bridge.bounded_inbound_report([
             {"role": "user", "text": "x" * 1000} for _ in range(20)
         ])), 500)
+
+    def test_inbound_report_prioritizes_reason_after_greeting_without_inventing_it(self):
+        report = bridge.bounded_inbound_report([
+            {"role": "user", "text": "Hello."},
+            {"role": "assistant", "text": "Why are you calling?"},
+            {"role": "user", "text": "I am calling about the damaged delivery."},
+            {"role": "user", "text": "Please tell Chirag the box was open."},
+        ])
+        self.assertEqual(report, (
+            "Caller said: I am calling about the damaged delivery. | "
+            "Please tell Chirag the box was open."
+        ))
+        self.assertNotIn("Why are you calling", report)
+        late_reason = bridge.bounded_inbound_report([
+            {"role": "user", "text": "Hello."},
+            {"role": "user", "text": "My name is Alex from the courier company."},
+            {"role": "user", "text": "I am calling about a delivery problem."},
+            {"role": "user", "text": "Okay thanks."},
+        ])
+        self.assertTrue(late_reason.startswith(
+            "Caller said: I am calling about a delivery problem."
+        ))
+        self.assertEqual(bridge.bounded_inbound_report([
+            {"role": "user", "text": "नमस्ते"},
+            {"role": "user", "text": "मुझे डिलीवरी के बारे में बात करनी है"},
+        ]), "Caller said: मुझे डिलीवरी के बारे में बात करनी है")
+        sensitive = bridge.bounded_inbound_report([
+            {"role": "user", "text": "My password is bluebird; the package is damaged."},
+        ])
+        self.assertNotIn("bluebird", sensitive)
+        self.assertIn("package is damaged", sensitive)
+
+    def test_inferred_reason_requires_structured_speech_grounding_and_redaction(self):
+        turns = ["I am calling about the damaged delivery."]
+        report = bridge.validated_inferred_reason(json.dumps({
+            "reason": "The caller wants to discuss the damaged delivery.",
+            "evidence": "damaged delivery",
+        }), turns)
+        self.assertEqual(report, (
+            "Likely reason (inferred, unverified): "
+            "The caller wants to discuss the damaged delivery."
+        ))
+        for value in (
+            '{"reason":"Delivery problem","evidence":"unsupported words"}',
+            '{"reason":"Delivery problem","evidence":"damaged delivery","extra":true}',
+            '{"reason":"","evidence":"damaged delivery"}',
+            'Delivery problem',
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                bridge.validated_inferred_reason(value, turns)
+        redacted = bridge.validated_inferred_reason(json.dumps({
+            "reason": "Call 9000000001 about delivery.", "evidence": "damaged delivery",
+        }), turns)
+        self.assertNotIn("9000000001", redacted)
+        bridge.validated_spooled_inbound_report(redacted)
+
+    def test_post_call_sol_inference_uses_only_redacted_caller_speech(self):
+        async def check():
+            from unittest import mock
+
+            class FakeApp:
+                def __init__(self):
+                    self.calls = []
+                    self.futures = {}
+                    self.listeners = set()
+
+                def add_notification_listener(self, listener):
+                    self.listeners.add(listener)
+                    return lambda: self.listeners.discard(listener)
+
+                def notification_future(self, method, predicate):
+                    future = asyncio.get_running_loop().create_future()
+                    self.futures[method] = (predicate, future)
+                    return future
+
+                async def request(self, method, params, timeout=35):
+                    self.calls.append((method, params))
+                    if method == "thread/start":
+                        return {"model": "gpt-6-sol", "thread": {
+                            "id": "reason-thread", "model": "gpt-6-sol",
+                            "modelProvider": "openai",
+                        }}
+                    if method == "turn/start":
+                        for listener in tuple(self.listeners):
+                            listener("item/completed", {
+                                "threadId": "reason-thread", "turnId": "reason-turn",
+                                "item": {"type": "agentMessage", "id": "a1", "text": json.dumps({
+                                    "reason": "The caller wants to discuss a damaged delivery.",
+                                    "evidence": "damaged delivery",
+                                })},
+                            })
+                        self.futures["turn/completed"][1].set_result({
+                            "threadId": "reason-thread", "turn": {
+                                "id": "reason-turn", "status": "completed",
+                                "itemsView": "notLoaded", "items": [],
+                            },
+                        })
+                        return {"turn": {"id": "reason-turn"}}
+                    raise AssertionError(method)
+
+            service = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", allow_inbound=True,
+                spool_dir=self.spool_dir,
+            )
+            app = FakeApp()
+            transcript = [
+                {"role": "assistant", "text": "Secret owner context and account token."},
+                {"role": "user", "text": "Hello."},
+                {"role": "user", "text": "My number is 9000000001. I called about the damaged delivery."},
+            ]
+            with mock.patch.object(service, "ensure_codex", new=mock.AsyncMock(return_value=app)):
+                result = await service.infer_inbound_reason(transcript)
+            self.assertEqual(result, (
+                "Likely reason (inferred, unverified): "
+                "The caller wants to discuss a damaged delivery."
+            ))
+            self.assertEqual([name for name, _ in app.calls], ["thread/start", "turn/start"])
+            self.assertFalse(app.listeners)
+            thread = app.calls[0][1]
+            self.assertEqual(thread["model"], "gpt-6-sol")
+            self.assertFalse(thread["allowProviderModelFallback"])
+            self.assertTrue(thread["ephemeral"])
+            self.assertEqual(thread["sandbox"], "read-only")
+            self.assertEqual(thread["approvalPolicy"], "never")
+            self.assertEqual(thread["dynamicTools"], [])
+            self.assertEqual(thread["environments"], [])
+            self.assertEqual(thread["selectedCapabilityRoots"], [])
+            turn = app.calls[1][1]
+            self.assertEqual(turn["outputSchema"], bridge.INBOUND_REASON_SCHEMA)
+            self.assertEqual(turn["model"], "gpt-6-sol")
+            text = turn["input"][0]["text"]
+            self.assertIn("damaged delivery", text)
+            self.assertNotIn("9000000001", text)
+            self.assertNotIn("Secret owner context", text)
+            self.assertNotIn("Hello.", text)
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_inference_starts_after_durable_quote_and_replays_quote_on_cancellation(self):
+        async def check():
+            from unittest import mock
+
+            first = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", allow_inbound=True,
+                spool_dir=self.spool_dir,
+            )
+            transcript = [{"role": "user", "text": "Please call me about the delivery."}]
+            async def cancelled_inference(_transcript):
+                pending = first.terminal_spool._path("call-test")
+                self.assertTrue(pending.exists())
+                self.assertIn("Caller said: ", pending.read_text())
+                self.assertIn("call-test", first.inbound_reason_pending)
+                raise asyncio.CancelledError
+
+            with mock.patch.object(first, "infer_inbound_reason", cancelled_inference):
+                with self.assertRaises(asyncio.CancelledError):
+                    await first.finish_call("call-test", "inbound", transcript)
+            self.assertNotIn("call-test", first.inbound_reason_pending)
+
+            restarted = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", allow_inbound=False,
+                spool_dir=self.spool_dir,
+            )
+            with mock.patch.object(restarted, "report", new=mock.AsyncMock(return_value=True)) as sent:
+                self.assertEqual(await restarted.replay_pending_terminal_events(), 1)
+            self.assertTrue(sent.await_args.kwargs["inbound_report"].startswith("Caller said: "))
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_successful_inference_atomically_promotes_spooled_quote(self):
+        async def check():
+            from unittest import mock
+
+            service = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", allow_inbound=True,
+                spool_dir=self.spool_dir,
+            )
+            reason = "Likely reason (inferred, unverified): Damaged delivery."
+            async def infer(_transcript):
+                record = service.terminal_spool._read(
+                    service.terminal_spool._path("call-test")
+                )
+                self.assertTrue(record["inbound_report"].startswith("Caller said: "))
+                self.assertEqual(await service.replay_pending_terminal_events(), 0)
+                return reason
+
+            with mock.patch.object(service, "infer_inbound_reason", infer), \
+                    mock.patch.object(service, "report", new=mock.AsyncMock(return_value=False)) as report:
+                await service.finish_call("call-test", "inbound", [
+                    {"role": "user", "text": "I called about a damaged delivery."},
+                ])
+            self.assertEqual(report.await_args.kwargs["inbound_report"], reason)
+            stored = service.terminal_spool._read(service.terminal_spool._path("call-test"))
+            self.assertEqual(stored["inbound_report"], reason)
+            self.assertNotIn("call-test", service.inbound_reason_pending)
+
+        import asyncio
+        asyncio.run(check())
 
     def test_inbound_enable_flag_requires_explicit_true(self):
         self.assertFalse(bridge.enabled_flag(""))
@@ -1036,6 +1241,8 @@ class VobizBridgeTests(unittest.TestCase):
         )
         multilingual = "Caller said (unverified): मुझे आपसे बात करनी है"
         self.assertEqual(bridge.validated_inbound_notification(multilingual), multilingual)
+        inferred = "Likely reason (inferred, unverified): Damaged delivery."
+        self.assertEqual(bridge.validated_inbound_notification(inferred), inferred)
         for message in (
             None,
             "Please call back about a delivery.",
@@ -1046,11 +1253,200 @@ class VobizBridgeTests(unittest.TestCase):
             "Caller said (unverified): Hello\u202eowner",
             "Caller said (unverified):  double  spaces",
             "Caller said (unverified): " + "a" * 200,
+            bridge.INBOUND_INFERENCE_PREFIX,
+            "Likely reason (inferred, unverified): Call 9000000001",
         ):
             with self.subTest(message=message), self.assertRaisesRegex(
                 ValueError, "notification_message_invalid"
             ):
                 bridge.validated_inbound_notification(message)
+
+    def test_hermes_sender_is_fixed_and_caller_text_cannot_be_media_directive(self):
+        self.assertEqual(bridge.validated_hermes_sender(
+            sys.executable, "telegram:995938451",
+        ), (sys.executable, "telegram:995938451"))
+        for target in ("telegram", "telegram:@owner", "telegram:995938451:1",
+                       "discord:995938451", "telegram:0", "telegram:123;echo bad"):
+            with self.subTest(target=target), self.assertRaisesRegex(
+                ValueError, "explicit Telegram chat ID"
+            ):
+                bridge.validated_hermes_sender(sys.executable, target)
+        with self.assertRaisesRegex(ValueError, "executable absolute file"):
+            bridge.validated_hermes_sender("hermes", "telegram:995938451")
+        message = bridge.hermes_inbound_message(
+            "Caller said (unverified): MEDIA:/tmp/private.pdf [[as_document]]", "call-test",
+        )
+        self.assertNotIn("MEDIA:", message)
+        self.assertNotIn("[[as_document]]", message)
+        self.assertIn("media∶/tmp/private.pdf", message)
+        self.assertIn("Call reference: call-test", message)
+        self.assertIn("<pre>Caller said (unverified):", message)
+
+    def test_hermes_alert_renders_caller_html_markdown_and_links_as_literal_text(self):
+        caller_text = (
+            'Caller said (unverified): </pre><a href="https://bad.example">tap</a> '
+            '**urgent** [pay](https://bad.example) MEDIA:/tmp/x.pdf [[as_document]]'
+        )
+        message = bridge.hermes_inbound_message(caller_text, "call-test")
+
+        class ParsedHTML(HTMLParser):
+            def __init__(self):
+                super().__init__(convert_charrefs=True)
+                self.tags = []
+                self.text = []
+
+            def handle_starttag(self, tag, attrs):
+                self.tags.append(tag)
+
+            def handle_endtag(self, tag):
+                self.tags.append("/" + tag)
+
+            def handle_data(self, data):
+                self.text.append(data)
+
+        parsed = ParsedHTML()
+        parsed.feed(message)
+        self.assertEqual(parsed.tags, ["pre", "/pre"])
+        rendered = "".join(parsed.text)
+        self.assertIn('</pre><a href="https://bad.example">tap</a>', rendered)
+        self.assertIn('**urgent** [pay](https://bad.example)', rendered)
+        self.assertIn('media∶/tmp/x.pdf ［［as_document］］', rendered)
+        self.assertNotIn('<a href="https://bad.example">', message)
+        self.assertNotIn('MEDIA:/tmp/x.pdf', message)
+        self.assertNotIn('[[as_document]]', message)
+
+    def test_hermes_cli_requires_confirmed_send_and_pipes_caller_text_to_stdin(self):
+        async def check():
+            from unittest import mock
+
+            service = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", spool_dir=self.spool_dir,
+                hermes_send_executable=sys.executable,
+                hermes_notification_target="telegram:995938451",
+            )
+            commands = []
+            bodies = []
+            reply = {"success": True, "platform": "telegram", "chat_id": "995938451",
+                     "message_id": "msg-1"}
+
+            class Process:
+                returncode = 0
+
+                async def communicate(self, body=None):
+                    bodies.append(body)
+                    return json.dumps(reply).encode(), b""
+
+            async def create_process(*args, **kwargs):
+                commands.append((args, kwargs))
+                return Process()
+
+            with mock.patch.object(bridge.asyncio, "create_subprocess_exec", create_process):
+                await service.send_hermes_notification(
+                    "Caller said (unverified): MEDIA:/tmp/private.pdf", "call-test",
+                )
+                self.assertEqual(commands[0][0], (
+                    sys.executable, "send", "--to", "telegram:995938451", "--file", "-", "--json",
+                ))
+                self.assertEqual(commands[0][1]["stderr"], bridge.asyncio.subprocess.DEVNULL)
+                self.assertNotIn(b"MEDIA:", bodies[0])
+                self.assertIn(b"call-test", bodies[0])
+                accepted = dict(reply)
+                for changed in (
+                    {**accepted, "skipped": True},
+                    {**accepted, "success": False},
+                    {**accepted, "chat_id": "123"},
+                    {**accepted, "message_id": ""},
+                ):
+                    reply.clear()
+                    reply.update(changed)
+                    with self.assertRaisesRegex(RuntimeError, "hermes_notification_rejected"):
+                        await service.send_hermes_notification(
+                            bridge.INBOUND_NOTIFICATION, "call-test",
+                        )
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_hermes_outbox_retries_and_ack_failure_does_not_repeat_send(self):
+        async def check():
+            from unittest import mock
+
+            service = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", spool_dir=self.spool_dir,
+                hermes_send_executable=sys.executable,
+                hermes_notification_target="telegram:995938451",
+                caller_relay_url="https://caller.example", caller_agent_token="c" * 40,
+            )
+            claimed = {"notification": {
+                "call_id": "call-test", "idempotency_key": "vobiz-inbound-call-test",
+                "caller_name": "Hermes",
+                "message": "Caller said (unverified): The parcel was damaged.",
+            }}
+            sender = mock.AsyncMock(side_effect=[RuntimeError("telegram_unavailable"), None])
+            with mock.patch.object(service, "send_hermes_notification", sender), \
+                    mock.patch.object(bridge, "http_json", new=mock.AsyncMock(
+                        side_effect=[(200, claimed), (200, claimed), (503, {})]
+                    )) as request:
+                self.assertEqual(await service.drain_notifications(), 0)
+                self.assertEqual(await service.drain_notifications(), 0)
+            self.assertEqual(sender.await_count, 2)
+            self.assertEqual(request.await_count, 3)
+            self.assertTrue(service.hermes_notification_receipts.has("call-test"))
+
+            restarted = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", spool_dir=self.spool_dir,
+                hermes_send_executable=sys.executable,
+                hermes_notification_target="telegram:995938451",
+            )
+            self.assertTrue(restarted.hermes_notification_receipts.has("call-test"))
+            with mock.patch.object(restarted, "send_hermes_notification", sender), \
+                    mock.patch.object(bridge, "http_json", new=mock.AsyncMock(
+                        side_effect=[(200, claimed), (200, {"ok": True}),
+                                     (200, {"notification": None})]
+                    )) as request:
+                self.assertEqual(await restarted.drain_notifications(), 1)
+            self.assertEqual(sender.await_count, 2)
+            self.assertFalse(restarted.hermes_notification_receipts.has("call-test"))
+            self.assertTrue(request.await_args_list[1].args[0].endswith("/call-test/ack"))
+            self.assertFalse(any("caller.example" in call.args[0]
+                                 for call in request.await_args_list))
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_hermes_mode_starts_notification_loop_without_caller_relay(self):
+        async def check():
+            import asyncio
+            from unittest import mock
+
+            service = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", spool_dir=self.spool_dir,
+                hermes_send_executable=sys.executable,
+                hermes_notification_target="telegram:995938451",
+            )
+            started = asyncio.Event()
+
+            async def notification_loop():
+                started.set()
+                await asyncio.Event().wait()
+
+            async def ensure_codex():
+                await asyncio.wait_for(started.wait(), timeout=1)
+                raise RuntimeError("test_stop")
+
+            with mock.patch.object(service, "notification_loop", notification_loop), \
+                    mock.patch.object(service, "terminal_event_loop", new=mock.AsyncMock()), \
+                    mock.patch.object(service, "ensure_codex", ensure_codex):
+                with self.assertRaisesRegex(RuntimeError, "test_stop"):
+                    await bridge.serve(service, "127.0.0.1", 0)
+            self.assertTrue(started.is_set())
+
+        import asyncio
+        asyncio.run(check())
 
     def test_invalid_claimed_owner_alert_is_not_forwarded_or_acknowledged(self):
         async def check():
