@@ -991,23 +991,34 @@ function inboundProviderStatus(params) {
 
 export async function handleInboundCallback(request, env, kind, fetcher = fetch, callbackToken = null) {
   if (!["answer", "hangup"].includes(kind)) return json(404, { error: "not_found" });
-  if (!inboundConfigured(env) || !baseURL(env) || !bridgeURL(env)) {
+  const logRejection = (reason) => {
+    console.warn(JSON.stringify({ event: "vobiz_inbound_callback_rejected", kind, reason }));
+  };
+  if (!inboundConfigured(env)) {
+    logRejection("inbound_config_missing");
+    return json(503, { error: "vobiz_inbound_not_configured" });
+  }
+  if (!baseURL(env)) {
+    logRejection("invalid_base_url");
+    return json(503, { error: "vobiz_inbound_not_configured" });
+  }
+  if (!bridgeURL(env)) {
+    logRejection("invalid_bridge_url");
     return json(503, { error: "vobiz_inbound_not_configured" });
   }
   const tokenRoute = callbackToken !== null;
   if (tokenRoute && new URL(request.url).pathname !==
       `/v1/vobiz/inbound/${kind}/${callbackToken}`) {
+    logRejection("token_path_mismatch");
     return json(403, { error: "invalid_vobiz_callback" });
   }
   if (tokenRoute && !(await validInboundCallbackToken(callbackToken, env.VOBIZ_INBOUND_CALLBACK_TOKEN))) {
+    logRejection("token_invalid");
     return json(403, { error: "invalid_vobiz_callback" });
   }
   // Vobiz signs URL + nonce, not the form body. The fixed route requires HMAC;
   // the optional token URL binds one CallUUID and event to its first exact body.
   let rawBody = null;
-  const logRejection = (reason) => {
-    console.warn(JSON.stringify({ event: "vobiz_inbound_callback_rejected", kind, reason }));
-  };
   const params = await verifiedCallback(request, env, true, logRejection, {
     verifyAllSignatures: tokenRoute,
     onRawBody: (raw) => { rawBody = raw; },

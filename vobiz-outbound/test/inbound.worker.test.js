@@ -200,6 +200,52 @@ describe("signed Vobiz inbound relay", () => {
       .toBe(0);
   });
 
+  it("logs privacy-safe reasons for inbound configuration and token precheck failures", async () => {
+    const wrongToken = CALLBACK_TOKEN.slice(0, -1) + "g";
+    const cases = [
+      { reason: "inbound_config_missing", local: { ...enabledEnv(), VOBIZ_AUTH_ID: undefined },
+        path: ANSWER_PATH, token: null, status: 503, error: "vobiz_inbound_not_configured" },
+      { reason: "invalid_base_url", local: { ...enabledEnv(), VOBIZ_PUBLIC_BASE_URL: "http://relay.example" },
+        path: ANSWER_PATH, token: null, status: 503, error: "vobiz_inbound_not_configured" },
+      { reason: "invalid_bridge_url", local: { ...enabledEnv(), VOBIZ_BRIDGE_WSS_URL: "https://bridge.example/vobiz" },
+        path: ANSWER_PATH, token: null, status: 503, error: "vobiz_inbound_not_configured" },
+      { reason: "token_path_mismatch", local: enabledEnv(),
+        path: TOKEN_HANGUP_PATH, token: CALLBACK_TOKEN, status: 403,
+        error: "invalid_vobiz_callback" },
+      { reason: "token_invalid", local: enabledEnv(),
+        path: `${ANSWER_PATH}/${wrongToken}`, token: wrongToken, status: 403,
+        error: "invalid_vobiz_callback" },
+    ];
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const testCase of cases) {
+        const callUUID = crypto.randomUUID();
+        const response = await handleInboundCallback(
+          unsignedCallback(testCase.path, "StartApp", callUUID),
+          testCase.local, "answer", healthyBridge, testCase.token,
+        );
+        expect(response.status).toBe(testCase.status);
+        expect(await response.json()).toEqual({ error: testCase.error });
+        const logged = warning.mock.calls.at(-1);
+        expect(logged).toHaveLength(1);
+        expect(JSON.parse(logged[0])).toEqual({
+          event: "vobiz_inbound_callback_rejected",
+          kind: "answer",
+          reason: testCase.reason,
+        });
+        for (const sensitive of [CALLBACK_TOKEN, wrongToken, CALLER, DID,
+          callUUID, "relay.example", "bridge.example"]) {
+          expect(logged[0]).not.toContain(sensitive);
+        }
+      }
+      expect(warning).toHaveBeenCalledTimes(cases.length);
+    } finally {
+      warning.mockRestore();
+    }
+    expect((await env.DB.prepare("SELECT COUNT(*) AS count FROM vobiz_inbound_calls").first()).count)
+      .toBe(0);
+  });
+
   it("does not log a field rejection for a valid verified inbound callback", async () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
