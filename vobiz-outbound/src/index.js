@@ -726,10 +726,12 @@ async function verifiedCallback(request, env, requireSignature = false,
   if (requireSignature) {
     const authIDs = params.getAll("auth_id");
     if (!authIDs.length) return reject("auth_id_missing");
-    if (authIDs.length !== 1 || authIDs[0] !== env.VOBIZ_AUTH_ID) return reject("auth_id_mismatch");
+    if (authIDs.length !== 1) return reject("auth_id_duplicate");
+    if (authIDs[0] !== env.VOBIZ_AUTH_ID) return reject("auth_id_mismatch");
     const callUUIDs = params.getAll("CallUUID");
     if (!callUUIDs.length) return reject("call_uuid_missing");
-    if (callUUIDs.length !== 1 || !isUUID(callUUIDs[0])) return reject("call_uuid_invalid");
+    if (callUUIDs.length !== 1) return reject("call_uuid_duplicate");
+    if (!isUUID(callUUIDs[0])) return reject("call_uuid_invalid");
   }
   if (nonce) {
     // Inbound Answer URLs are fixed and have no per-call secret. Retain their signed
@@ -933,18 +935,47 @@ function outboundCallbackIdentity(params, env, kind, row) {
   return { ok: true, providerUUID };
 }
 
-function inboundCallbackFields(params, kind, env) {
+function inboundCallbackFields(params, kind, env, allowMissingRouting = false) {
   const expectedEvent = kind === "answer" ? "StartApp" : "Hangup";
-  const providerUUID = oneParameter(params, "CallUUID");
-  const calledNumber = normalizedCallbackNumber(oneParameter(params, "To"));
+  const events = params.getAll("Event");
+  if (!events.length) return { ok: false, reason: "event_missing" };
+  if (events.length !== 1) return { ok: false, reason: "event_duplicate" };
+  if (events[0] !== expectedEvent) return { ok: false, reason: "event_mismatch" };
+
+  const directions = params.getAll("Direction");
+  if (!directions.length && !allowMissingRouting) {
+    return { ok: false, reason: "direction_missing" };
+  }
+  if (directions.length > 1) return { ok: false, reason: "direction_duplicate" };
+  if (directions.length === 1 && directions[0].toLowerCase() !== "inbound") {
+    return { ok: false, reason: "direction_mismatch" };
+  }
+
+  const authIDs = params.getAll("auth_id");
+  if (!authIDs.length) return { ok: false, reason: "auth_id_missing" };
+  if (authIDs.length !== 1) return { ok: false, reason: "auth_id_duplicate" };
+  if (authIDs[0] !== env.VOBIZ_AUTH_ID) return { ok: false, reason: "auth_id_mismatch" };
+
+  const providerUUIDs = params.getAll("CallUUID");
+  if (!providerUUIDs.length) return { ok: false, reason: "call_uuid_missing" };
+  if (providerUUIDs.length !== 1) return { ok: false, reason: "call_uuid_duplicate" };
+  if (!isUUID(providerUUIDs[0])) return { ok: false, reason: "call_uuid_invalid" };
+
+  const calledNumbers = params.getAll("To");
+  if (!calledNumbers.length && !allowMissingRouting) return { ok: false, reason: "to_missing" };
+  if (calledNumbers.length > 1) return { ok: false, reason: "to_duplicate" };
+  const configuredNumber = normalizedNumber(env.VOBIZ_NUMBER);
+  const calledNumber = calledNumbers.length === 1
+    ? normalizedCallbackNumber(calledNumbers[0]) : configuredNumber;
+  if (calledNumbers.length === 1 && calledNumber !== configuredNumber) {
+    return { ok: false, reason: "to_mismatch" };
+  }
+
   const fromValues = params.getAll("From");
-  if (oneParameter(params, "Event") !== expectedEvent ||
-      oneParameter(params, "Direction")?.toLowerCase() !== "inbound" ||
-      oneParameter(params, "auth_id") !== env.VOBIZ_AUTH_ID ||
-      !isUUID(providerUUID) || calledNumber !== normalizedNumber(env.VOBIZ_NUMBER) ||
-      fromValues.length > 1) return null;
+  if (fromValues.length > 1) return { ok: false, reason: "from_duplicate" };
   return {
-    providerUUID: providerUUID.toLowerCase(),
+    ok: true,
+    providerUUID: providerUUIDs[0].toLowerCase(),
     calledNumber,
     callerNumber: normalizedInboundCaller(fromValues[0]),
   };
@@ -974,13 +1005,19 @@ export async function handleInboundCallback(request, env, kind, fetcher = fetch,
   // Vobiz signs URL + nonce, not the form body. The fixed route requires HMAC;
   // the optional token URL binds one CallUUID and event to its first exact body.
   let rawBody = null;
-  const params = await verifiedCallback(request, env, !tokenRoute, () => {}, {
+  const logRejection = (reason) => {
+    console.warn(JSON.stringify({ event: "vobiz_inbound_callback_rejected", kind, reason }));
+  };
+  const params = await verifiedCallback(request, env, true, logRejection, {
     verifyAllSignatures: tokenRoute,
     onRawBody: (raw) => { rawBody = raw; },
   });
   if (!params) return json(403, { error: "invalid_vobiz_callback" });
-  const fields = inboundCallbackFields(params, kind, env);
-  if (!fields) return json(403, { error: "vobiz_inbound_call_mismatch" });
+  const fields = inboundCallbackFields(params, kind, env, tokenRoute);
+  if (!fields.ok) {
+    logRejection(fields.reason);
+    return json(403, { error: "vobiz_inbound_call_mismatch" });
+  }
   if (tokenRoute && (typeof rawBody !== "string" || !(await reserveInboundTokenCallback(
     env, kind, fields.providerUUID, new URL(request.url).pathname, rawBody)))) {
     return json(403, { error: "invalid_vobiz_callback" });
