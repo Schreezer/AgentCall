@@ -502,6 +502,14 @@ describe("signed Vobiz inbound relay", () => {
       );
       expect(response.status).toBe(403);
     }
+    const duplicateAccount = new URLSearchParams({ Event: "StartApp",
+      CallUUID: crypto.randomUUID(), From: CALLER });
+    duplicateAccount.append("auth_id", "test-auth");
+    duplicateAccount.append("auth_id", "test-auth");
+    expect((await handleInboundCallback(
+      await signedCallbackWithParams(TOKEN_ANSWER_PATH, "12345678901234568215",
+        duplicateAccount), local, "answer", healthyBridge, CALLBACK_TOKEN,
+    )).status).toBe(403);
     const queried = new Request(`https://relay.example${TOKEN_ANSWER_PATH}?extra=1`, {
       method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ Event: "StartApp", CallUUID: crypto.randomUUID(),
@@ -535,11 +543,11 @@ describe("signed Vobiz inbound relay", () => {
     }
   });
 
-  it("completes signed token Answer and Hangup handling when both routing fields are omitted", async () => {
+  it("completes signed token Answer and Hangup without auth_id or routing fields", async () => {
     const local = { ...enabledEnv(), VOBIZ_INBOUND_CALLBACK_TOKEN: CALLBACK_TOKEN };
     const callUUID = crypto.randomUUID();
     const callbackParams = (event) => new URLSearchParams({
-      Event: event, CallUUID: callUUID, From: CALLER, auth_id: "test-auth",
+      Event: event, CallUUID: callUUID, From: CALLER,
     });
     const answer = await handleInboundCallback(
       await signedCallbackWithParams(TOKEN_ANSWER_PATH, "12345678901234568240",
@@ -582,6 +590,11 @@ describe("signed Vobiz inbound relay", () => {
       unsignedCallback(TOKEN_ANSWER_PATH, "StartApp"),
       local, "answer", healthyBridge, CALLBACK_TOKEN,
     )).status).toBe(403);
+    expect((await handleInboundCallback(new Request(`https://relay.example${TOKEN_ANSWER_PATH}`, {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ Event: "StartApp", CallUUID: crypto.randomUUID(),
+        From: CALLER }),
+    }), local, "answer", healthyBridge, CALLBACK_TOKEN)).status).toBe(403);
     const cases = [
       (params) => params.set("Direction", "outbound"),
       (params) => params.append("Direction", "inbound"),

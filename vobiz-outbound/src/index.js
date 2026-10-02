@@ -725,9 +725,11 @@ async function verifiedCallback(request, env, requireSignature = false,
   if (options.onRawBody) options.onRawBody(raw);
   if (requireSignature) {
     const authIDs = params.getAll("auth_id");
-    if (!authIDs.length) return reject("auth_id_missing");
-    if (authIDs.length !== 1) return reject("auth_id_duplicate");
-    if (authIDs[0] !== env.VOBIZ_AUTH_ID) return reject("auth_id_mismatch");
+    if (!authIDs.length && !options.allowMissingAuthID) return reject("auth_id_missing");
+    if (authIDs.length > 1) return reject("auth_id_duplicate");
+    if (authIDs.length === 1 && authIDs[0] !== env.VOBIZ_AUTH_ID) {
+      return reject("auth_id_mismatch");
+    }
     const callUUIDs = params.getAll("CallUUID");
     if (!callUUIDs.length) return reject("call_uuid_missing");
     if (callUUIDs.length !== 1) return reject("call_uuid_duplicate");
@@ -935,7 +937,7 @@ function outboundCallbackIdentity(params, env, kind, row) {
   return { ok: true, providerUUID };
 }
 
-function inboundCallbackFields(params, kind, env, allowMissingRouting = false) {
+function inboundCallbackFields(params, kind, env, allowMissingTokenFields = false) {
   const expectedEvent = kind === "answer" ? "StartApp" : "Hangup";
   const events = params.getAll("Event");
   if (!events.length) return { ok: false, reason: "event_missing" };
@@ -943,7 +945,7 @@ function inboundCallbackFields(params, kind, env, allowMissingRouting = false) {
   if (events[0] !== expectedEvent) return { ok: false, reason: "event_mismatch" };
 
   const directions = params.getAll("Direction");
-  if (!directions.length && !allowMissingRouting) {
+  if (!directions.length && !allowMissingTokenFields) {
     return { ok: false, reason: "direction_missing" };
   }
   if (directions.length > 1) return { ok: false, reason: "direction_duplicate" };
@@ -952,9 +954,13 @@ function inboundCallbackFields(params, kind, env, allowMissingRouting = false) {
   }
 
   const authIDs = params.getAll("auth_id");
-  if (!authIDs.length) return { ok: false, reason: "auth_id_missing" };
-  if (authIDs.length !== 1) return { ok: false, reason: "auth_id_duplicate" };
-  if (authIDs[0] !== env.VOBIZ_AUTH_ID) return { ok: false, reason: "auth_id_mismatch" };
+  if (!authIDs.length && !allowMissingTokenFields) {
+    return { ok: false, reason: "auth_id_missing" };
+  }
+  if (authIDs.length > 1) return { ok: false, reason: "auth_id_duplicate" };
+  if (authIDs.length === 1 && authIDs[0] !== env.VOBIZ_AUTH_ID) {
+    return { ok: false, reason: "auth_id_mismatch" };
+  }
 
   const providerUUIDs = params.getAll("CallUUID");
   if (!providerUUIDs.length) return { ok: false, reason: "call_uuid_missing" };
@@ -962,7 +968,7 @@ function inboundCallbackFields(params, kind, env, allowMissingRouting = false) {
   if (!isUUID(providerUUIDs[0])) return { ok: false, reason: "call_uuid_invalid" };
 
   const calledNumbers = params.getAll("To");
-  if (!calledNumbers.length && !allowMissingRouting) return { ok: false, reason: "to_missing" };
+  if (!calledNumbers.length && !allowMissingTokenFields) return { ok: false, reason: "to_missing" };
   if (calledNumbers.length > 1) return { ok: false, reason: "to_duplicate" };
   const configuredNumber = normalizedNumber(env.VOBIZ_NUMBER);
   const calledNumber = calledNumbers.length === 1
@@ -1021,6 +1027,7 @@ export async function handleInboundCallback(request, env, kind, fetcher = fetch,
   let rawBody = null;
   const params = await verifiedCallback(request, env, true, logRejection, {
     verifyAllSignatures: tokenRoute,
+    allowMissingAuthID: tokenRoute,
     onRawBody: (raw) => { rawBody = raw; },
   });
   if (!params) return json(403, { error: "invalid_vobiz_callback" });
