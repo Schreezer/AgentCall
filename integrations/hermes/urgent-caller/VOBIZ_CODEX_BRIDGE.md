@@ -16,28 +16,48 @@ API key or fallback provider.
 
 The bridge does **not** install or restart Hermes's gateway. Inbound admission
 is enabled on the DebianBat bridge and its public health reports Codex and
-runtime ready. Worker version `cce034ec-4bc3-483e-94cd-abb731edd388` has
-inbound admission enabled after 68 tests passed, and Worker public health is
-healthy. The purchased DID `+918071580171` is attached to the Vobiz
-`Hermes_Inbound` Application, but Jio forwarding remains unconfigured and no
-live inbound conversation has been proven. Three direct-DID attempts around
-16:25, 16:26, and 16:28 IST on 1 October reached the Worker but were rejected
-by callback field validation before any call row or WebSocket session reached
-this bridge. The deployed patch requires provider HMAC on the token route,
-allows documented callbacks to omit `Direction` and `To`, and rejects wrong or
-duplicate supplied values. A real post-patch call is pending. The bridge
-admits one call at a time.
+runtime ready. Worker version `d6f44830-78ab-4ef1-9896-10286f435c40` was
+deployed around 12:20 IST on 2 October after the 69-test Worker check passed;
+Worker public health is healthy. The purchased DID `+918071580171` is attached
+to the Vobiz `Hermes_Inbound` Application. Earlier calls failed callback field
+validation before media, including two traced `auth_id_missing` rejections on
+2 October. The current confidential-token routes require provider HMAC and
+allow `auth_id`, `Direction`, or `To` to be absent; wrong, empty, or duplicate
+supplied values are rejected. Fixed HMAC-only routes remain strict. A direct
+DID call around 12:40 IST then received HTTP 200 on Answer and Hangup. The
+owner heard the agent speak during the 69-second call, D1 recorded
+`completed`, and a phone-derived `gpt-6-sol` inferred reason was stored. The
+Hermes Telegram alert was accepted by the Telegram API and acknowledged in
+the Worker at 12:41:54 IST; phone UI receipt was not verified. The owner
+reported voice breakup, and bridge telemetry showed first audio about 13.7
+seconds after answer. Vobiz's PCMA CDR reported MOS 4.5 and 0 ms jitter with a
+normal caller hangup, which does not explain the heard breakup or delay. Their
+root cause remains unproven. Jio forwarding is off pending quality and
+reliability work. The bridge admits one call at a time.
 It holds audio only in short memory buffers; it does not save audio. Inbound
 calls send a bounded, digit-redacted report to the isolated Worker at call end.
 The bridge never writes the full transcript to its recovery spool.
+
+At about 12:53 IST on 2 October, DebianBat's single Cloudflare tunnel was
+switched from automatic QUIC selection to the supported HTTP/2 transport for
+a controlled trial after repeated QUIC stream failures. The four HTTP/2
+connections and public bridge health came up; two connections still
+re-registered shortly afterward, so improved stability is not yet proven.
+At about 12:56 IST, bridge source commit `3d2e316` was installed with a
+privacy-safe numeric `audio_summary` after each call. It counts inbound and
+model-output timing gaps, input buffer drops, playback clears, output send
+stalls, and best-effort WebRTC packet totals. The patch does not change the
+codec, audio timing, or interruption thresholds. A new live call is needed to
+evaluate both changes; the 12:40 call predates them.
 The inference-aware script is deployed on DebianBat and public health is ready;
 its pre-update backup is
 `/home/chirag/.config/caller-vobiz-backups/20260930T090107Z-inferred-reason-v2`.
 A synthetic post-call Sol inference using Hermes credentials returned a grounded
-result with the required inferred, unverified label. The provider callback path
-has now been observed, but a callback accepted through call creation, inbound
-conversation, phone-derived Sol reason, and Telegram alert remain unproven. Jio
-forwarding is off, so only direct calls to the Vobiz DID are affected.
+result with the required inferred, unverified label. The 2 October direct call
+also produced a phone-derived inference stored in D1 and a Telegram API-accepted
+alert acknowledged by the Worker. This one call does not prove repeatability,
+clear audio, or receipt on the owner's phone. With Jio forwarding off, only
+direct calls to the Vobiz DID are affected.
 
 ## Runtime
 
@@ -303,15 +323,18 @@ so the stream fails closed. A remote `/claim` records the attachment in the
 Worker in the background; the provider Hangup and terminal bridge event can
 still record the outcome if that claim is late.
 
-The DID is already attached to `Hermes_Inbound`, and the Worker and bridge
-inbound flags are enabled for one controlled direct-DID test. Fixed callback
-routes remain HMAC-only. The active token-suffixed routes require both one
-confidential, canonical 43-character bearer and provider HMAC. They accept
-documented callbacks that omit `Direction` or `To`, while rejecting wrong or
-duplicate supplied values. Authentication, identity, one-call capacity, and
+The DID is attached to `Hermes_Inbound`, and the Worker and bridge inbound
+flags are enabled for the controlled direct-DID pilot. Fixed callback routes
+remain HMAC-only and require `auth_id`, `Direction`, and `To`. The active
+token-suffixed routes require both one confidential, canonical 43-character
+bearer and provider HMAC. They allow `auth_id`, `Direction`, or `To` to be
+absent, while rejecting wrong, empty, or duplicate supplied values. The 2
+October direct call verified callback acceptance, bidirectional media, a
+terminal report with a Sol-inferred reason, and Telegram API acceptance with
+Worker acknowledgement. Authentication, identity, one-call capacity, and
 bridge-readiness failures return `<Hangup/>` without starting a voice session.
-Verify the post-patch callbacks, bidirectional media, terminal report, and
-Telegram owner alert in the same controlled test.
+Further controlled calls should test repeatability, audio-start latency,
+intelligibility, fallback alerts, and owner phone UI receipt.
 If any provider callback or media assumption fails, immediately set the Worker
 inbound flag false and redeploy before diagnosis. Vobiz number binding changes
 where incoming calls route immediately. A forwarded
@@ -331,9 +354,11 @@ otherwise it is rejected. A valid result atomically replaces the durable quote
 and is labeled `Likely reason (inferred, unverified):` in the report and owner
 alert. Timeout, cancellation, validation failure, model error, or a process
 restart leaves the already-durable caller quote as the fallback. No useful
-speech retains the generic fallback. This inference path is deployed and its
-Hermes-authenticated Sol request succeeded synthetically, but it has not been
-proven with a live inbound phone call. Unknown callers get no Hermes
+speech retains the generic fallback. This inference path is deployed. A
+Hermes-authenticated Sol request succeeded synthetically, and the 2 October
+inbound phone call produced a stored Sol inference. One call does not establish
+consistent performance or validate the caller's stated reason as fact.
+Unknown callers get no Hermes
 tools or private context. Inbound callers hear a fixed greeting that identifies
 the speaker as Chirag's AI assistant and offers to take a message. The agent
 asks why the person called and records a brief message; it accepts a name if
