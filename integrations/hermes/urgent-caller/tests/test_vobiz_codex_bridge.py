@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import io
 import json
 import pathlib
 import struct
@@ -531,6 +532,246 @@ class VobizBridgeTests(unittest.TestCase):
             bridge.decode_vobiz_audio("not base64!", "audio/x-l16", 16000)
         with self.assertRaises(ValueError):
             bridge.decode_vobiz_audio(base64.b64encode(pcm).decode(), "audio/x-l16", 24000)
+
+    def test_audio_diagnostics_count_gaps_and_sends_without_call_content(self):
+        diagnostics = bridge.CallAudioDiagnostics()
+        for when in (1.0, 1.061, 1.162):
+            diagnostics.inbound_media(when)
+        for when in (2.0, 2.061, 2.162):
+            diagnostics.output_frame(when, True)
+        diagnostics.output_frame(2.2, False)
+        diagnostics.output_frame(3.0, True)
+        diagnostics.output_sent(0.019)
+        diagnostics.output_sent(0.024)
+        self.assertEqual(diagnostics.inbound_frames, 3)
+        self.assertEqual(diagnostics.inbound_gap_over_60ms, 2)
+        self.assertEqual(diagnostics.inbound_gap_over_100ms, 1)
+        self.assertEqual(diagnostics.max_inbound_gap_ms, 101)
+        self.assertEqual(diagnostics.output_frames, 2)
+        self.assertEqual(diagnostics.output_voice_gap_over_60ms, 2)
+        self.assertEqual(diagnostics.output_voice_gap_over_100ms, 1)
+        self.assertEqual(diagnostics.max_output_voice_gap_ms, 101)
+        self.assertEqual(diagnostics.output_send_stalls, 1)
+        summary = diagnostics.summary("call-test")
+        self.assertIn("phase=audio_summary", summary)
+        self.assertIn("output_max_send_ms=24", summary)
+        self.assertIn("webrtc_in_packets_received=-1", summary)
+        self.assertNotIn("payload", summary)
+        self.assertNotIn("transcript", summary)
+
+    def test_webrtc_stats_snapshot_collects_audio_rtp_before_peer_close(self):
+        async def check():
+            diagnostics = bridge.CallAudioDiagnostics()
+            events = []
+
+            class Peer:
+                async def getStats(self):
+                    events.append("getStats")
+                    return {
+                        "in-1": types.SimpleNamespace(
+                            type="inbound-rtp", kind="audio",
+                            packetsReceived=120, packetsLost=3,
+                        ),
+                        "in-2": types.SimpleNamespace(
+                            type="inbound-rtp", kind="audio",
+                            packetsReceived=20, packetsLost=1,
+                        ),
+                        "out": types.SimpleNamespace(
+                            type="outbound-rtp", kind="audio", packetsSent=125,
+                        ),
+                        "video": types.SimpleNamespace(
+                            type="inbound-rtp", kind="video",
+                            packetsReceived=999, packetsLost=999,
+                        ),
+                    }
+
+                async def close(self):
+                    events.append("close")
+
+            session = bridge.CodexPSTNSession(None, None, "stream-test", {}, None)
+            session.audio_diagnostics = diagnostics
+            session.peer = Peer()
+            await session.close()
+            self.assertEqual(events, ["getStats", "close"])
+            self.assertEqual(diagnostics.webrtc_in_packets_received, 140)
+            self.assertEqual(diagnostics.webrtc_in_packets_lost, 4)
+            self.assertEqual(diagnostics.webrtc_out_packets_sent, 125)
+            self.assertIn("webrtc_in_packets_lost=4", diagnostics.summary("call-test"))
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_webrtc_stats_timeout_does_not_block_peer_close(self):
+        async def check():
+            import asyncio
+            from unittest import mock
+
+            diagnostics = bridge.CallAudioDiagnostics()
+            closed = []
+
+            class Peer:
+                async def getStats(self):
+                    await asyncio.Event().wait()
+
+                async def close(self):
+                    closed.append(True)
+
+            session = bridge.CodexPSTNSession(None, None, "stream-test", {}, None)
+            session.audio_diagnostics = diagnostics
+            session.peer = Peer()
+            with mock.patch.object(bridge, "WEBRTC_STATS_TIMEOUT_SECONDS", 0.01):
+                await asyncio.wait_for(session.close(), timeout=0.2)
+            self.assertEqual(closed, [True])
+            self.assertEqual(diagnostics.webrtc_in_packets_received, -1)
+            self.assertEqual(diagnostics.webrtc_in_packets_lost, -1)
+            self.assertEqual(diagnostics.webrtc_out_packets_sent, -1)
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_input_track_counts_queue_drops_and_underruns(self):
+        async def check():
+            from unittest import mock
+
+            class Plane:
+                def update(self, _pcm):
+                    pass
+
+            class Frame:
+                def __init__(self, **_kwargs):
+                    self.planes = [Plane()]
+
+            with mock.patch.dict(sys.modules, {
+                "aiortc": types.SimpleNamespace(AudioStreamTrack=object),
+                "av": types.SimpleNamespace(AudioFrame=Frame),
+            }):
+                track = bridge.VobizInputTrack(16000)
+                diagnostics = bridge.CallAudioDiagnostics()
+                track.audio_diagnostics = diagnostics
+                track.push(b"\x01\x00" * (320 * 13))
+                self.assertEqual(track.queue.qsize(), 12)
+                self.assertEqual(diagnostics.input_queue_drops, 1)
+                while not track.queue.empty():
+                    track.queue.get_nowait()
+                await track.recv()
+                self.assertEqual(diagnostics.input_underruns, 1)
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_receive_media_counts_only_inbound_audio_frames(self):
+        async def check():
+            service = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex",
+            )
+            pcm = base64.b64encode(b"\x00\x00" * 320).decode()
+            pushed = []
+            diagnostics = bridge.CallAudioDiagnostics()
+            session = types.SimpleNamespace(
+                stream_id="stream-test", audio_diagnostics=diagnostics,
+                input_track=types.SimpleNamespace(sample_rate=16000, push=pushed.append),
+            )
+
+            class Socket:
+                async def __aiter__(self):
+                    for track in ("inbound", "outbound", "inbound"):
+                        yield json.dumps({
+                            "event": "media", "streamId": "stream-test",
+                            "media": {"track": track, "payload": pcm},
+                        })
+
+            await service._receive_media(Socket(), session, "audio/x-l16", 16000)
+            self.assertEqual(diagnostics.inbound_frames, 2)
+            self.assertEqual(len(pushed), 2)
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_output_send_stall_and_barge_clear_are_counted_only_on_send(self):
+        async def check():
+            import asyncio
+            from unittest import mock
+
+            class Socket:
+                def __init__(self):
+                    self.events = []
+
+                async def send(self, raw):
+                    await asyncio.sleep(0.03)
+                    self.events.append(json.loads(raw))
+
+            class Frame:
+                samples = 480
+                planes = [struct.pack("<" + "h" * 480, *([3000] * 480))]
+
+            class Remote:
+                async def recv(self):
+                    if not hasattr(self, "sent"):
+                        self.sent = True
+                        return Frame()
+                    raise asyncio.CancelledError()
+
+            socket = Socket()
+            session = bridge.CodexPSTNSession(None, socket, "stream-test", {}, None)
+            session._activated = True
+            session.audio_diagnostics = bridge.CallAudioDiagnostics()
+            with mock.patch.dict(sys.modules, {"av": types.SimpleNamespace(
+                AudioResampler=lambda **_: types.SimpleNamespace(resample=lambda frame: [frame]),
+            )}):
+                with self.assertRaises(asyncio.CancelledError):
+                    await session._forward_output(Remote())
+            await session.interrupt_playback()
+            await session.interrupt_playback()
+            self.assertEqual([event["event"] for event in socket.events],
+                             ["playAudio", "clearAudio"])
+            self.assertEqual(session.audio_diagnostics.output_frames, 1)
+            self.assertEqual(session.audio_diagnostics.output_send_stalls, 1)
+            self.assertGreaterEqual(session.audio_diagnostics.max_output_send_ms, 20)
+            self.assertEqual(session.audio_diagnostics.barge_in_clears, 1)
+
+        import asyncio
+        asyncio.run(check())
+
+    def test_failed_call_logs_one_bounded_audio_summary(self):
+        async def check():
+            from unittest import mock
+
+            service = bridge.VobizCodexBridge(
+                relay_url="https://relay.example", agent_token="a" * 40,
+                stream_secret=SECRET, codex_command="codex", allow_inbound=True,
+                spool_dir=self.spool_dir,
+            )
+            token = self.token(direction="inbound")
+
+            class Socket:
+                request = types.SimpleNamespace(path="/vobiz?token=" + token)
+
+                async def recv(self):
+                    return json.dumps({"event": "start", "start": {
+                        "streamId": "stream-test", "callId": "provider-id",
+                        "mediaFormat": {"encoding": "audio/x-l16", "sampleRate": 16000},
+                    }})
+
+                async def send(self, _raw):
+                    pass
+
+                async def close(self, **_kwargs):
+                    pass
+
+            log = io.StringIO()
+            with mock.patch.object(service, "context", new=mock.AsyncMock(
+                    side_effect=RuntimeError("bridge_context_unavailable"))), \
+                    mock.patch.object(service, "report", new=mock.AsyncMock()), \
+                    mock.patch.object(bridge.sys, "stderr", log):
+                await service.handle(Socket())
+            self.assertEqual(log.getvalue().count("phase=audio_summary"), 1)
+            self.assertIn("inbound_frames=0", log.getvalue())
+            self.assertNotIn(token, log.getvalue())
+            self.assertNotIn("provider-id", log.getvalue())
+
+        import asyncio
+        asyncio.run(check())
 
     def test_connecting_tone_uses_audible_india_cadence_and_declared_pcm(self):
         frame = bridge.connecting_tone_frame(0)

@@ -194,6 +194,7 @@ CONNECTING_TONE_FRAME_SECONDS = 0.05
 CONNECTING_TONE_CYCLE_FRAMES = 60
 CONNECTING_TONE_CLEAR_TIMEOUT_SECONDS = 3
 WEBRTC_DISCONNECT_GRACE_SECONDS = 5
+WEBRTC_STATS_TIMEOUT_SECONDS = 0.75
 PREPARE_TIMEOUT_SECONDS = 38
 PREPARED_CALL_TTL_SECONDS = 180
 
@@ -928,6 +929,101 @@ class CallConnectingTone:
             await asyncio.gather(self._task, return_exceptions=True)
 
 
+class CallAudioDiagnostics:
+    """Numeric, per-call audio counters; never retain media or caller content."""
+
+    def __init__(self):
+        self.inbound_frames = 0
+        self.inbound_gap_over_60ms = 0
+        self.inbound_gap_over_100ms = 0
+        self.max_inbound_gap_ms = 0
+        self._last_inbound_at: float | None = None
+        self.input_queue_drops = 0
+        self.input_underruns = 0
+        self.barge_in_clears = 0
+        self.output_frames = 0
+        self.output_voice_gap_over_60ms = 0
+        self.output_voice_gap_over_100ms = 0
+        self.max_output_voice_gap_ms = 0
+        self._last_output_voice_at: float | None = None
+        self.output_send_stalls = 0
+        self.max_output_send_ms = 0
+        self.webrtc_in_packets_received = -1
+        self.webrtc_in_packets_lost = -1
+        self.webrtc_out_packets_sent = -1
+
+    def inbound_media(self, now: float) -> None:
+        if self._last_inbound_at is not None:
+            gap_seconds = max(0, now - self._last_inbound_at)
+            gap_ms = round(gap_seconds * 1000)
+            self.max_inbound_gap_ms = max(self.max_inbound_gap_ms, gap_ms)
+            self.inbound_gap_over_60ms += gap_seconds > 0.06
+            self.inbound_gap_over_100ms += gap_seconds > 0.1
+        self._last_inbound_at = now
+        self.inbound_frames += 1
+
+    def output_frame(self, now: float, voiced: bool) -> None:
+        # Count gaps only within a voiced run; silence between turns is normal.
+        if not voiced:
+            self._last_output_voice_at = None
+            return
+        if self._last_output_voice_at is not None:
+            gap_seconds = max(0, now - self._last_output_voice_at)
+            self.max_output_voice_gap_ms = max(
+                self.max_output_voice_gap_ms, round(gap_seconds * 1000)
+            )
+            self.output_voice_gap_over_60ms += gap_seconds > 0.06
+            self.output_voice_gap_over_100ms += gap_seconds > 0.1
+        self._last_output_voice_at = now
+
+    def output_sent(self, elapsed_seconds: float) -> None:
+        elapsed_ms = max(0, round(elapsed_seconds * 1000))
+        self.output_frames += 1
+        self.output_send_stalls += elapsed_seconds > 0.02
+        self.max_output_send_ms = max(self.max_output_send_ms, elapsed_ms)
+
+    def webrtc_stats(self, report) -> None:
+        """Keep only numeric audio RTP totals from aiortc's stats report."""
+        for stat in report.values():
+            if getattr(stat, "kind", None) != "audio":
+                continue
+            if getattr(stat, "type", None) == "inbound-rtp":
+                for attr, field in (
+                    ("packetsReceived", "webrtc_in_packets_received"),
+                    ("packetsLost", "webrtc_in_packets_lost"),
+                ):
+                    value = getattr(stat, attr, None)
+                    if type(value) is int and value >= 0:
+                        setattr(self, field, max(0, getattr(self, field)) + value)
+            elif getattr(stat, "type", None) == "outbound-rtp":
+                value = getattr(stat, "packetsSent", None)
+                if type(value) is int and value >= 0:
+                    self.webrtc_out_packets_sent = max(
+                        0, self.webrtc_out_packets_sent
+                    ) + value
+
+    def summary(self, call_id: str) -> str:
+        return (
+            f"[caller vobiz] call_id={call_id} phase=audio_summary "
+            f"inbound_frames={self.inbound_frames} "
+            f"inbound_gap_gt60ms={self.inbound_gap_over_60ms} "
+            f"inbound_gap_gt100ms={self.inbound_gap_over_100ms} "
+            f"inbound_max_gap_ms={self.max_inbound_gap_ms} "
+            f"input_queue_drops={self.input_queue_drops} "
+            f"input_underruns={self.input_underruns} "
+            f"barge_in_clears={self.barge_in_clears} "
+            f"output_frames={self.output_frames} "
+            f"output_voice_gap_gt60ms={self.output_voice_gap_over_60ms} "
+            f"output_voice_gap_gt100ms={self.output_voice_gap_over_100ms} "
+            f"output_voice_max_gap_ms={self.max_output_voice_gap_ms} "
+            f"output_send_stalls_gt20ms={self.output_send_stalls} "
+            f"output_max_send_ms={self.max_output_send_ms} "
+            f"webrtc_in_packets_received={self.webrtc_in_packets_received} "
+            f"webrtc_in_packets_lost={self.webrtc_in_packets_lost} "
+            f"webrtc_out_packets_sent={self.webrtc_out_packets_sent}"
+        )
+
+
 class VobizInputTrack:
     """An aiortc-compatible 20 ms audio track fed by Vobiz media frames."""
 
@@ -953,6 +1049,7 @@ class VobizInputTrack:
         self.buffer = bytearray()
         self.next_pts = 0
         self.next_play_at: float | None = None
+        self.audio_diagnostics: CallAudioDiagnostics | None = None
 
     def push(self, pcm: bytes) -> None:
         self.buffer.extend(pcm)
@@ -962,6 +1059,8 @@ class VobizInputTrack:
             del self.buffer[:frame_bytes]
             if self.queue.full():
                 self.queue.get_nowait()  # Never play stale speech into Codex.
+                if self.audio_diagnostics:
+                    self.audio_diagnostics.input_queue_drops += 1
             self.queue.put_nowait(frame)
 
     async def recv(self):
@@ -976,6 +1075,8 @@ class VobizInputTrack:
             await asyncio.sleep(max(0, self.next_play_at - asyncio.get_running_loop().time()))
         if self.queue.empty():
             pcm = b"\x00" * (self.samples_per_frame * 2)
+            if self.audio_diagnostics:
+                self.audio_diagnostics.input_underruns += 1
         else:
             pcm = self.queue.get_nowait()
         frame = AudioFrame(format="s16", layout="mono", samples=self.samples_per_frame)
@@ -1018,6 +1119,11 @@ class CodexPSTNSession:
         self._activated = False
         self._closing = False
         self._disconnect_task: asyncio.Task | None = None
+        self.audio_diagnostics: CallAudioDiagnostics | None = None
+
+    def set_audio_diagnostics(self, diagnostics: CallAudioDiagnostics) -> None:
+        self.audio_diagnostics = diagnostics
+        self.input_track.audio_diagnostics = diagnostics
 
     def _notification(self, method: str, params: dict) -> None:
         if params.get("threadId") != self.thread_id:
@@ -1223,19 +1329,27 @@ class CodexPSTNSession:
                             not self._activated or self._clear_pending
                             or time.monotonic() < self._suppress_output_until
                         ):
+                            if self.audio_diagnostics:
+                                self.audio_diagnostics.output_frame(time.monotonic(), False)
                             continue
                         voice_rms = pcm_rms(pcm)
                         if self.connecting_tone:
                             if voice_rms <= 250:
+                                if self.audio_diagnostics:
+                                    self.audio_diagnostics.output_frame(time.monotonic(), False)
                                 continue
                             await self.connecting_tone.handoff_to_voice()
                             self.connecting_tone = None
+                        if self.audio_diagnostics:
+                            self.audio_diagnostics.output_frame(
+                                time.monotonic(), voice_rms > 250
+                            )
                         if voice_rms > 250:
                             self.last_voice_at = time.monotonic()
                         if self.l16_endian == "big":
                             pcm = b"".join(pcm[index:index + 2][::-1] for index in range(0, len(pcm), 2))
                         async with self._write_lock:
-                            await self.socket.send(json.dumps({
+                            message = json.dumps({
                                 "event": "playAudio",
                                 "streamId": self.stream_id,
                                 "media": {
@@ -1243,7 +1357,13 @@ class CodexPSTNSession:
                                     "sampleRate": 24000,
                                     "payload": base64.b64encode(pcm).decode(),
                                 },
-                            }, separators=(",", ":")))
+                            }, separators=(",", ":"))
+                            send_started_at = time.monotonic()
+                            await self.socket.send(message)
+                            if self.audio_diagnostics:
+                                self.audio_diagnostics.output_sent(
+                                    time.monotonic() - send_started_at
+                                )
                             self._playing = True
                             if voice_rms > 250:
                                 self.first_audio.set()
@@ -1276,6 +1396,8 @@ class CodexPSTNSession:
             await self.socket.send(json.dumps({
                 "event": "clearAudio", "streamId": self.stream_id,
             }, separators=(",", ":")))
+            if self.audio_diagnostics:
+                self.audio_diagnostics.barge_in_clears += 1
             self._playing = False
             self._clear_pending = True
             self._output_generation += 1
@@ -1331,6 +1453,15 @@ class CodexPSTNSession:
         if self.output_task:
             self.output_task.cancel()
             await asyncio.gather(self.output_task, return_exceptions=True)
+        if self.peer and self.audio_diagnostics:
+            try:
+                report = await asyncio.wait_for(
+                    self.peer.getStats(), timeout=WEBRTC_STATS_TIMEOUT_SECONDS
+                )
+                self.audio_diagnostics.webrtc_stats(report)
+            except Exception:
+                # Stats are best effort; -1 in the summary means unavailable.
+                pass
         if self.thread_id:
             try:
                 await self.app.request("thread/realtime/stop", {"threadId": self.thread_id}, timeout=8)
@@ -2032,6 +2163,7 @@ class VobizCodexBridge:
         deadline_task = None
         claim_task = None
         connected_report_task = None
+        audio_diagnostics = None
         connected = False
         failed = False
         failed_detail = ""
@@ -2057,6 +2189,7 @@ class VobizCodexBridge:
                 ("audio/x-l16", 8000), ("audio/x-l16", 16000), ("audio/x-mulaw", 8000)
             }:
                 raise RuntimeError("vobiz_media_format_unsupported")
+            audio_diagnostics = CallAudioDiagnostics()
             answered_at = time.monotonic()
             # The signed WebSocket token and start frame have been checked.
             connecting_tone = CallConnectingTone(socket, stream_id, self.l16_endian)
@@ -2077,6 +2210,8 @@ class VobizCodexBridge:
                 ):
                     raise RuntimeError("prepared_voice_unavailable")
                 session.attach(socket, stream_id, connecting_tone, self.l16_endian)
+                if hasattr(session, "set_audio_diagnostics"):
+                    session.set_audio_diagnostics(audio_diagnostics)
                 claim_task = asyncio.create_task(self.claim_remote_with_retries(call_id))
                 print(
                     f"[caller vobiz] call_id={call_id} phase=attached "
@@ -2111,6 +2246,8 @@ class VobizCodexBridge:
                 print(f"[caller vobiz] call_id={call_id} phase=cold_start", file=sys.stderr)
                 input_track = VobizInputTrack(sample_rate)
                 session = CodexPSTNSession(app, socket, stream_id, context, input_track, self.l16_endian)
+                if hasattr(session, "set_audio_diagnostics"):
+                    session.set_audio_diagnostics(audio_diagnostics)
                 session.connecting_tone = connecting_tone
                 session._write_lock = connecting_tone.write_lock
             receiver = asyncio.create_task(self._receive_media(socket, session, encoding, sample_rate))
@@ -2199,6 +2336,8 @@ class VobizCodexBridge:
                     print(f"[caller vobiz] cleanup failed: {type(error).__name__}", file=sys.stderr)
             elif prepared_record:
                 await self._discard_prepared(prepared_record)
+            if audio_diagnostics:
+                print(audio_diagnostics.summary(call_id), file=sys.stderr)
             try:
                 if prepared_outbound:
                     # Persist the terminal outcome before any post-call HTTPS
@@ -2222,6 +2361,7 @@ class VobizCodexBridge:
         speech_frames = 0
         last_clear = 0.0
         input_resampler = None
+        diagnostics = getattr(session, "audio_diagnostics", None)
         async for raw in socket:
             if not isinstance(raw, str) or len(raw.encode()) > MAX_WS_MESSAGE:
                 raise RuntimeError("vobiz_message_invalid")
@@ -2235,6 +2375,8 @@ class VobizCodexBridge:
                 media = event.get("media") or {}
                 if media.get("track", "inbound") != "inbound":
                     continue
+                if diagnostics:
+                    diagnostics.inbound_media(time.monotonic())
                 pcm = decode_vobiz_audio(media.get("payload"), encoding, sample_rate, self.l16_endian)
                 target_rate = session.input_track.sample_rate
                 if target_rate == sample_rate:
