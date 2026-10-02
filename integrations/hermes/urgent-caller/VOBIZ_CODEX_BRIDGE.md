@@ -40,9 +40,11 @@ The bridge never writes the full transcript to its recovery spool.
 
 At about 12:53 IST on 2 October, DebianBat's single Cloudflare tunnel was
 switched from automatic QUIC selection to the supported HTTP/2 transport for
-a controlled trial after repeated QUIC stream failures. The four HTTP/2
-connections and public bridge health came up; two connections still
-re-registered shortly afterward, so improved stability is not yet proven.
+a controlled trial after repeated QUIC stream failures. All four HTTP/2
+connections and public bridge health came up, but several connections still
+closed and re-registered. The override was removed and automatic QUIC restored
+at about 13:03 IST; four connections and public bridge health were verified.
+The HTTP/2 trial did not establish a stability improvement.
 At about 12:56 IST, bridge source commit `3d2e316` was installed with a
 privacy-safe numeric `audio_summary` after each call. It counts inbound and
 model-output timing gaps, input buffer drops, playback clears, output send
